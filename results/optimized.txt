@@ -1,0 +1,38 @@
+=== zkMetal Optimized Benchmark Results ===
+Date: 2026-03-28
+Machine: Apple M3 Pro, 12 cores, 18 GB RAM
+bb: optimized build (DontZeroMemory + per-window GPU bailout)
+
+Optimizations applied:
+  1. DontZeroMemory for sumcheck partial evaluation polynomials
+     - Skip zeroing memory for polynomials that get immediately overwritten
+  2. Per-window GPU bucket imbalance bailout
+     - Detect structured polynomials that cause 1000ms+ GPU reduce stalls
+     - Bail out to CPU Pippenger when any window has >10% points in one bucket
+
+━━━ bench_poseidon ━━━
+  Circuit size (gates): 74790
+  Prove (UltraHonk, no-zk): 468.6ms  (baseline: 537.7ms, -12.9%)
+    Oink: 252.7ms  Sumcheck: 39.2ms  PCS: 176.7ms
+
+━━━ bench_merkle ━━━
+  Circuit size (gates): 43837
+  Prove (UltraHonk, no-zk): 312.3ms  (baseline: 342.6ms, -8.8%)
+    Oink: 145.6ms  Sumcheck: 27.5ms  PCS: 139.2ms
+
+━━━ bench_ec_ops ━━━
+  Circuit size (gates): 29929
+  Prove (UltraHonk, no-zk): 209.7ms  (baseline: 265.0ms, -20.9%)
+    Oink: 95.4ms  Sumcheck: 20.3ms  PCS: 94.0ms
+
+━━━ persistia_incremental_proof (production circuit) ━━━
+  Circuit size (gates): 428729
+  Prove (UltraHonk, no-zk): 1465.6ms  (baseline: 4716.9ms*, -68.9%*)
+    Oink: 816.6ms  Sumcheck: 156.5ms  PCS: 492.5ms
+  * Baseline included GPU reduce pathology (1000ms+ stall).
+    Fair baseline (no GPU stall): ~1550ms. Improvement: ~5.4%
+
+━━━ Summary ━━━
+  Average improvement across all circuits: ~12% (excluding production GPU stall)
+  Key benefit: Eliminated 1000ms+ GPU reduce stalls on structured polynomials
+  Variance reduction: Production circuit now consistently 1400-1500ms (was 1400-4700ms)

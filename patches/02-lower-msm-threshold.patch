@@ -1,0 +1,12 @@
+--- a/cpp/src/barretenberg/ecc/scalar_multiplication/metal/metal_msm.hpp
++++ b/cpp/src/barretenberg/ecc/scalar_multiplication/metal/metal_msm.hpp
+@@ -28,7 +28,7 @@
+ // Minimum number of points before dispatching to Metal GPU.
+ // Below this threshold, CPU Pippenger is faster due to GPU dispatch overhead.
+ // With GLV endomorphism (128-bit scalars, half the windows), GPU MSM is competitive
+-// at lower point counts. At 429K: GPU ~50ms vs CPU ~150ms.
+-static constexpr size_t METAL_MSM_THRESHOLD = 1 << 17; // 131072
++// at lower point counts. Lowered to capture Gemini fold polynomials on GPU.
++static constexpr size_t METAL_MSM_THRESHOLD = 1 << 15; // 32768
+
+ /**

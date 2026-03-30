@@ -1,0 +1,3 @@
+[workspace]
+members = ["poseidon-hash", "merkle-tree", "ec-ops"]
+default-member = "poseidon-hash"

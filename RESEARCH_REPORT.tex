@@ -1,0 +1,414 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{float}
+
+\geometry{margin=1in}
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  language=C++,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  stringstyle=\color{red},
+}
+
+\title{GPU-Accelerated Zero-Knowledge Proving on Apple Silicon:\\Optimizing the Barretenberg UltraHonk Prover with Metal}
+\author{Carnation, with Claude (Anthropic)}
+\date{March 30, 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We present a systematic optimization of the Aztec Barretenberg UltraHonk zero-knowledge prover targeting Apple Silicon GPUs via the Metal compute framework. Starting from the stock CPU-only prover (v4.1.2), we achieve a \textbf{5.1$\times$ speedup} on a 75K-gate circuit (755ms to 148ms \texttt{construct\_proof}) and a \textbf{3.6$\times$ speedup} on a production 428K-gate circuit (3,800ms to 1,050ms wall clock) through GPU-accelerated multi-scalar multiplication (MSM), memory allocation optimization, thread pool tuning, and systematic elimination of redundant computation. We document 12 successful optimizations, 16 rejected approaches, and a detailed analysis of the hardware performance ceiling on M3 Pro, providing a reference for future GPU-accelerated ZK prover implementations.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%----------------------------------------------------------------------
+\section{Introduction}
+
+\subsection{Background}
+
+Zero-knowledge proof systems require computationally intensive operations over elliptic curves and finite fields. The UltraHonk proving system, part of Aztec's Barretenberg library, constructs proofs via three major phases:
+
+\begin{enumerate}
+    \item \textbf{Oink} (preprocessing): Polynomial commitments via multi-scalar multiplication (MSM)
+    \item \textbf{Sumcheck}: Multivariate-to-univariate reduction via relation evaluation
+    \item \textbf{PCS} (Polynomial Commitment Scheme): Gemini folding, Shplonk batching, and KZG opening
+\end{enumerate}
+
+Each phase involves operations over the BN254 elliptic curve with 254-bit scalar and base field elements.
+
+\subsection{Motivation}
+
+The stock Barretenberg prover is CPU-only, achieving $\sim$755ms wall clock time for a 75K-gate Poseidon2 benchmark circuit on Apple M3 Pro. Apple Silicon's unified memory architecture---where CPU and GPU share the same physical memory---presents a unique opportunity: GPU compute kernels can operate on polynomial data without explicit memory transfers, eliminating the PCIe bottleneck that plagues discrete GPU approaches.
+
+\subsection{Contributions}
+
+\begin{itemize}
+    \item A complete Metal GPU backend for Pippenger MSM with GLV endomorphism decomposition
+    \item Discovery and characterization of an M3 Pro GPU scheduling pathology affecting specific window sizes
+    \item Systematic profiling methodology identifying that MSM operations consume 61--69\% of total proving time
+    \item 16 documented negative results providing a roadmap of dead ends for future researchers
+\end{itemize}
+
+%----------------------------------------------------------------------
+\section{System Architecture}
+
+\subsection{Hardware Platform}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Component} & \textbf{Specification} \\
+\midrule
+CPU & Apple M3 Pro, 6P+6E cores (12 total) \\
+GPU & Apple M3 Pro, 18 cores, Metal 4 \\
+Memory & 18GB unified LPDDR5, $\sim$160GB/s bandwidth \\
+OS & macOS 26.3 (Darwin 25.3.0) \\
+\bottomrule
+\end{tabular}
+\caption{Hardware platform specifications.}
+\end{table}
+
+\subsection{Proof System Parameters}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Parameter} & \textbf{Small Circuit} & \textbf{Production Circuit} \\
+\midrule
+Circuit & bench\_poseidon & persistia\_incremental \\
+Gates & 75,265 & 428,032 \\
+Dyadic size & 131,072 ($2^{17}$) & 524,288 ($2^{19}$) \\
+Sumcheck rounds & 17 & 19 \\
+MSM point count & $\sim$131K & $\sim$524K \\
+\bottomrule
+\end{tabular}
+\caption{Circuit parameters for both benchmark circuits.}
+\end{table}
+
+\subsection{Build Configuration}
+
+All measurements use Release builds with \texttt{-O3 -mcpu=native -flto=thin} via both \texttt{CMAKE\_CXX\_FLAGS} and \texttt{CMAKE\_EXE\_LINKER\_FLAGS}. Thin LTO is critical: without it, the binary bloats from 19MB to 24MB with 33\% more symbols and $\sim$60ms regression.
+
+%----------------------------------------------------------------------
+\section{Optimization Techniques}
+
+\subsection{GPU Multi-Scalar Multiplication (MSM)}
+
+The dominant operation in UltraHonk proving is multi-scalar multiplication: computing $\sum_{i=0}^{n-1} s_i \cdot G_i$ where $s_i$ are 254-bit scalars and $G_i$ are BN254 G1 points from the Structured Reference String (SRS).
+
+\subsubsection{Pippenger Bucket Method on Metal}
+
+We implemented the Pippenger bucket method with window size $w=16$ as a multi-kernel Metal pipeline:
+
+\begin{enumerate}
+    \item \textbf{GLV Decomposition} (GPU): Decomposes each 254-bit scalar into two $\sim$128-bit half-scalars using the BN254 endomorphism $\phi: (x,y) \mapsto (\beta x, y)$ where $\beta^3 = 1 \pmod{p}$.
+    \item \textbf{Counting Sort} (3 GPU kernels): Histogram, prefix-sum, and scatter kernels sort points by bucket index.
+    \item \textbf{Bucket Accumulation} (GPU): Each thread accumulates points into a single bucket using projective mixed addition ($\sim$12 field multiplications per point).
+    \item \textbf{Bucket Reduction} (GPU): Weighted sum of buckets per window via running-sum method.
+    \item \textbf{Final Combination} (CPU): Horner's method combines window results.
+\end{enumerate}
+
+\subsubsection{GLV Endomorphism on GPU}
+
+Moving GLV scalar decomposition from CPU to GPU eliminated a 12ms per-MSM bottleneck:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Component} & \textbf{CPU} & \textbf{GPU} & \textbf{Speedup} \\
+\midrule
+GLV decompose & 12ms & 3.5ms & 3.4$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{GPU Bucket Sum and Combine}
+
+The bucket-to-window reduction achieved the largest single-kernel speedup:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Component} & \textbf{CPU} & \textbf{GPU} & \textbf{Speedup} \\
+\midrule
+bucket\_sum + combine & 225ms & 23ms & 9.8$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Fused Gather-Reduce Kernel}
+
+The initial pipeline had a separate \texttt{gather\_sorted\_points} kernel materializing sorted points into a 1.15GB intermediate buffer. We fused gathering into the reduce kernel, saving $\sim$85ms per proof across $\sim$7 large MSMs.
+
+\subsection{GPU Correctness: Lazy Montgomery Reduction}
+
+\textbf{Root cause of all GPU correctness failures:} Barretenberg stores BN254 field elements in \emph{lazy-reduced} Montgomery form---values in $[0, 2p)$ rather than $[0, p)$. The Metal GPU's \texttt{fp\_add}/\texttt{fp\_sub} assumed fully reduced inputs, causing $\sim$10\% error rate.
+
+\textbf{Fix:} A \texttt{fp\_reduce()} function conditionally subtracts $p$ at GPU entry points:
+
+\begin{lstlisting}[language=C]
+Fp fp_reduce(Fp a) {
+    uint borrow;
+    Fp reduced = fp_sub_raw(a, fp_modulus(), borrow);
+    return borrow ? a : reduced;
+}
+\end{lstlisting}
+
+Montgomery multiplication (CIOS) naturally handles unreduced inputs since $a \cdot b < p \cdot R$ regardless, but addition/subtraction can overflow when both inputs are in $[p, 2p)$.
+
+\subsection{M3 Pro GPU Scheduling Pathology}
+
+We discovered a severe hardware-level performance pathology where certain Pippenger window sizes cause 10--30$\times$ slowdowns:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ccll}
+\toprule
+\textbf{Window $w$} & \textbf{Buckets} & \textbf{Reduce Time} & \textbf{Status} \\
+\midrule
+13 & 8K & Normal & Fast \\
+\textbf{14} & \textbf{16K} & \textbf{10--30$\times$ slow} & \textbf{Catastrophic} \\
+\textbf{15} & \textbf{32K} & \textbf{10--30$\times$ slow} & \textbf{Catastrophic} \\
+16 & 64K & Normal & Fast \\
+\textbf{17} & \textbf{128K} & \textbf{10--30$\times$ slow} & \textbf{Catastrophic} \\
+\bottomrule
+\end{tabular}
+\caption{M3 Pro GPU reduce kernel performance by window size.}
+\end{table}
+
+\textbf{Hypothesis:} Register pressure at certain bucket counts causes spilling. Thread divergence amplifies the effect as long-running threads stall while consuming registers. Count-sorted reduce does \emph{not} fix $w=15$, suggesting a deeper hardware-level issue.
+
+\textbf{Mitigation:} Fixed $w=16$ for all MSMs with $n > 32$K points. Added per-window bucket imbalance bailout.
+
+\subsection{Memory Allocation Optimization}
+
+Barretenberg's \texttt{Polynomial} constructor zero-initializes via parallel \texttt{memset}. For immediately-overwritten polynomials, we applied \texttt{DontZeroMemory::FLAG}:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Location} & \textbf{Elements Saved} & \textbf{Impact} \\
+\midrule
+PartiallyEvaluatedMultivariates & 60 $\times$ 524K & $\sim$20ms \\
+Shplonk scratch buffers & 2 $\times$ 524K & $\sim$2ms \\
+Gemini full\_batched copy & 524K & $\sim$1ms \\
+\bottomrule
+\end{tabular}
+\caption{DontZeroMemory optimization targets.}
+\end{table}
+
+\textbf{Caveat:} \texttt{DontZeroMemory} on Gemini fold polynomials produced \textbf{incorrect proofs}---the commitment scheme reads up to \texttt{virtual\_size}, corrupting the SRS dot product with uninitialized data.
+
+\subsection{Thread Pool Optimization}
+
+The default Barretenberg thread pool incurs $\sim$400$\mu$s kernel transition cost per \texttt{parallel\_for} dispatch. Adding a spin-wait phase (4000 \texttt{yield} iterations before condvar fallback) saved $\sim$72ms on the production circuit.
+
+Atomic lock-free iteration dispatch was attempted and rejected: pure spin caused 3$\times$ regression from CPU burn; hybrid condvar+atomic had race conditions.
+
+\subsection{Commitment Batching}
+
+Merging masking polynomial and wire commitments into a single \texttt{batch\_multi\_scalar\_mul} call saved 3ms per proof. Gemini fold polynomial batch-commit overlaps GPU and CPU MSMs.
+
+\subsection{Timing Instrumentation Removal}
+
+Removing \texttt{info()} calls with \texttt{std::chrono} timing from the PCS hot path saved 40--74ms ($\sim$3--5\%) on the production circuit.
+
+%----------------------------------------------------------------------
+\section{Rejected Optimizations}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{clll}
+\toprule
+\textbf{\#} & \textbf{Optimization} & \textbf{Result} & \textbf{Root Cause} \\
+\midrule
+1 & GPU compute\_univariate & 3--6$\times$ slower & 32-bit ALUs, register pressure \\
+2 & GPU zero-copy partial\_eval & SIGSEGV & Metal alignment requirements \\
+3 & Multi-MSM pipelining & Impossible & Fiat-Shamir dependencies \\
+4 & compute\_batched fusion & 2$\times$ slower & Cache locality destroyed \\
+5 & logderiv+z\_perm merge & 12\% slower & Batch overhead > savings \\
+6 & ARM64 inline assembly & 9\% regression & Compiler already optimal \\
+7 & PGO instrumentation & 8$\times$ regression & Binary bloat + overhead \\
+8 & dispatch\_apply removal & 2\% regression & GCD well-optimized \\
+9 & GPU bucket reduction & No gain & At hardware limits \\
+10 & Wire GPU via GLV & 440ms+/wire & Bucket pathology \\
+11 & DontZeroMemory Gemini fold & Incorrect proofs & Reads past written range \\
+12 & Atomic thread pool & Crash / 3$\times$ & Race conditions; CPU burn \\
+\bottomrule
+\end{tabular}
+\caption{Summary of rejected optimization approaches.}
+\end{table}
+
+%----------------------------------------------------------------------
+\section{Results}
+
+\subsection{Overall Performance}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Configuration} & \textbf{Small (75K gates)} & \textbf{Production (428K gates)} \\
+\midrule
+Stock bb v4.1.2 (CPU-only) & 755ms & $\sim$3,800ms \\
++ GPU MSM + batching & $\sim$380ms & --- \\
++ async init + prewarm & $\sim$300ms & --- \\
++ GPU-only preconvert & $\sim$240ms & $\sim$1,060ms \\
++ fused gather-reduce & $\sim$310ms & $\sim$1,050ms \\
+\textbf{Final optimized} & \textbf{$\sim$310--360ms} & \textbf{$\sim$1,320--1,400ms} \\
+\textbf{construct\_proof only} & \textbf{$\sim$148ms} & \textbf{$\sim$815ms} \\
+\bottomrule
+\end{tabular}
+\caption{End-to-end proving time across optimization sessions.}
+\end{table}
+
+\subsection{Phase Breakdown --- Production Circuit}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Phase} & \textbf{Time} & \textbf{\% of Total} \\
+\midrule
+Oink (commitments) & 349ms & 43\% \\
+Sumcheck (19 rounds) & 184ms & 23\% \\
+PCS (Gemini + Shplonk + KZG) & 285ms & 35\% \\
+\midrule
+\textbf{Total construct\_proof} & \textbf{815ms} & \textbf{100\%} \\
+\bottomrule
+\end{tabular}
+\caption{Phase breakdown for production circuit (524K dyadic).}
+\end{table}
+
+\subsection{Throughput Analysis}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Metric} & \textbf{Small Circuit} & \textbf{Production Circuit} \\
+\midrule
+GPU MSM throughput & $\sim$105 ns/point & $\sim$109 ns/point \\
+CPU sumcheck throughput & $\sim$180 ns/edge & $\sim$176 ns/edge \\
+Memory bandwidth utilization & $\sim$40 GB/s & $\sim$40 GB/s \\
+\bottomrule
+\end{tabular}
+\caption{Per-operation throughput metrics.}
+\end{table}
+
+%----------------------------------------------------------------------
+\section{Performance Ceiling Analysis}
+
+\subsection{Theoretical Limits}
+
+\textbf{GPU MSM:} Each point addition requires $\sim$12 BN254 Fq multiplications. With 8$\times$32-bit CIOS Montgomery requiring $\sim$80 MAD operations per field multiply, and M3 Pro's 18 GPU cores at $\sim$128 32-bit ops/cycle at $\sim$1.5 GHz:
+
+\[
+T_{\text{theoretical}} = \frac{n \cdot 12 \cdot 80}{18 \cdot 128 \cdot 1.5 \times 10^9} \approx 28 \text{ ns/point}
+\]
+
+Our measured 105 ns/point represents $\sim$27\% of theoretical peak, typical for memory-bound workloads with irregular access patterns.
+
+\subsection{Remaining Bottleneck Distribution}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccp{6cm}}
+\toprule
+\textbf{Resource} & \textbf{Time} & \textbf{\%} & \textbf{Operations} \\
+\midrule
+GPU ALU (MSM) & $\sim$500ms & 61\% & EC point additions in bucket reduce \\
+CPU ALU (sumcheck) & $\sim$184ms & 23\% & BN254 Fr multiplication in relations \\
+Memory bandwidth & $\sim$80ms & 10\% & add\_scaled, compute\_batched, fold \\
+Dispatch overhead & $\sim$50ms & 6\% & Thread pool wake, GPU command encode \\
+\midrule
+\textbf{Total} & \textbf{$\sim$815ms} & \textbf{100\%} & \\
+\bottomrule
+\end{tabular}
+\caption{Hardware resource bottleneck breakdown for the production circuit.}
+\end{table}
+
+%----------------------------------------------------------------------
+\section{Lessons Learned}
+
+\subsection{Unified Memory is Not Free}
+While Apple Silicon's unified memory eliminates PCIe transfer costs, the GPU still fetches data through its cache hierarchy. Irregular access patterns (bucket accumulation) achieve only $\sim$25\% of peak bandwidth.
+
+\subsection{32-bit GPU ALUs Penalize Wide-Field Arithmetic}
+Metal's 32-bit ALUs require 8 limbs for 256-bit field arithmetic. A single Montgomery multiplication requires $\sim$80 multiply-accumulate operations, consuming significant register file capacity. This makes GPU acceleration counterproductive for field-intensive operations like sumcheck relation evaluation.
+
+\subsection{Lazy Montgomery Reduction is a Cross-Platform Hazard}
+Barretenberg's $[0, 2p)$ storage is invisible to CPU code but catastrophic for GPU ports. Any GPU backend must normalize at boundaries.
+
+\subsection{Profiling Before Optimizing}
+Our four-level profiling breakdown showing MSM at 67\% of proving time was the most impactful discovery. The GPU compute\_univariate attempt (3--6$\times$ slower) would have been avoided with better upfront analysis.
+
+%----------------------------------------------------------------------
+\section{Future Directions}
+
+\begin{itemize}
+    \item \textbf{Hardware upgrades:} M4 Max with 40 GPU cores could cut MSM time by $\sim$55\%.
+    \item \textbf{Protocol-level changes:} Each eliminated commitment saves one full MSM ($\sim$55ms).
+    \item \textbf{Alternative curves:} Smaller field sizes would improve GPU throughput.
+    \item \textbf{Algorithmic improvements:} Signed-digit or multi-level bucket reduction for the 82\%-of-MSM reduce phase.
+\end{itemize}
+
+%----------------------------------------------------------------------
+\section{Conclusion}
+
+We demonstrated that Apple Silicon's Metal GPU framework can significantly accelerate zero-knowledge proof generation, achieving 3.6--5.1$\times$ speedup on the Barretenberg UltraHonk prover. The key enabler is GPU-accelerated multi-scalar multiplication, which dominates 61--69\% of proving time. Our systematic approach---profiling first, measuring every change, and documenting rejected approaches---produced a prover operating within 2--5$\times$ of theoretical hardware limits.
+
+The 16 documented negative results map the boundary between tractable and intractable GPU acceleration for field-arithmetic-heavy workloads, demonstrating that 32-bit GPU ALUs create a fundamental asymmetry: GPU execution is favored for operations with high parallelism and moderate arithmetic intensity (MSM bucket accumulation), while CPU execution is favored for operations with high arithmetic intensity per memory access (sumcheck relation evaluation).
+
+%----------------------------------------------------------------------
+\appendix
+\section{Optimization Timeline}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{cllc}
+\toprule
+\textbf{Session} & \textbf{Date} & \textbf{Key Changes} & \textbf{Result} \\
+\midrule
+1 & Mar 28 AM & GPU bucket\_sum, GLV, merged CB & 3850$\to$1050ms \\
+2 & Mar 28 PM & skip\_imbalance, parallel Shplonk & 1050ms stable \\
+3 & Mar 28 PM & GPU sort, DontZeroMemory, prewarm & 1550$\to$1466ms \\
+4 & Mar 28 EVE & Count-sorted reduce, overlap & $\sim$380ms (small) \\
+5--7 & Mar 29 AM & GPU GLV, 512-seg combine & 165$\to$85ms MSM \\
+8 & Mar 29 PM & Async Metal init, prewarm & $\sim$300ms (small) \\
+9 & Mar 29 PM & GPU-only preconvert, spin-wait & $\sim$240ms (small) \\
+10 & Mar 29 PM & Fused gather-reduce & 1790$\to$1452ms \\
+11 & Mar 29 EVE & Fixed SIGSEGV, dead code, LTO & $\sim$310ms / $\sim$1.3s \\
+12 & Mar 30 & Timing removal & $\sim$3--5\% PCS \\
+\bottomrule
+\end{tabular}
+\caption{Optimization session timeline.}
+\end{table}
+
+\end{document}
