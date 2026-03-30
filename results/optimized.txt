@@ -1,4 +1,4 @@
-=== zkMetal Optimized Benchmark Results ===
+=== AztecFastTech Optimized Benchmark Results ===
 Date: 2026-03-28
 Machine: Apple M3 Pro, 12 cores, 18 GB RAM
 bb: optimized build (DontZeroMemory + per-window GPU bailout)

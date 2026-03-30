@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Aztec-style Noir proving benchmarks for zkMetal
+# AztecFastTech - Noir proving benchmarks with Metal GPU acceleration
 # Measures: compile time, witness generation, gate count, proving time, verification time
 set -euo pipefail
 
@@ -21,7 +21,7 @@ PACKAGES=(bench_poseidon bench_merkle bench_ec_ops)
 RESULTS_FILE="results/bench-$(date +%Y%m%d-%H%M%S).txt"
 mkdir -p results
 
-echo "=== zkMetal Aztec Benchmark Suite ===" | tee "$RESULTS_FILE"
+echo "=== AztecFastTech Benchmark Suite ===" | tee "$RESULTS_FILE"
 echo "Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" | tee -a "$RESULTS_FILE"
 echo "Machine: $(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)" | tee -a "$RESULTS_FILE"
 echo "Cores: $(sysctl -n hw.ncpu)" | tee -a "$RESULTS_FILE"

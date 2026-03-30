@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate valid Prover.toml files for aztec-bench circuits."""
+"""Generate valid Prover.toml files for AztecFastTech circuits."""
 import hashlib
 import struct
 import os
