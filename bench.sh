@@ -3,11 +3,12 @@
 # Measures: compile time, witness generation, gate count, proving time, verification time
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 
 # Use Metal-enabled bb if available (local build), otherwise fall back to installed bb
-BB_LOCAL="$ROOT/barretenberg/cpp/build/bin/bb"
+# BB_LOCAL env var overrides default path (e.g. BB_LOCAL=./bin/bb-opt ./bench.sh)
+BB_LOCAL="${BB_LOCAL:-$SCRIPT_DIR/barretenberg/cpp/build/bin/bb}"
 if [ -x "$BB_LOCAL" ]; then
     BB="$BB_LOCAL"
     BB_LABEL="local Metal-enabled build"
@@ -17,7 +18,8 @@ else
 fi
 
 PACKAGES=(bench_poseidon bench_merkle bench_ec_ops)
-RESULTS_FILE="aztec-bench/results.txt"
+RESULTS_FILE="results/bench-$(date +%Y%m%d-%H%M%S).txt"
+mkdir -p results
 
 echo "=== zkMetal Aztec Benchmark Suite ===" | tee "$RESULTS_FILE"
 echo "Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" | tee -a "$RESULTS_FILE"
@@ -38,9 +40,9 @@ for pkg in "${PACKAGES[@]}"; do
     echo "  ACIR opcodes: $acir_opcodes" | tee -a "$RESULTS_FILE"
     echo "  Circuit size (gates): $circuit_size" | tee -a "$RESULTS_FILE"
 
-    # Witness generation (run from aztec-bench subdir where the workspace is)
+    # Witness generation
     t0=$(python3 -c "import time; print(time.time())")
-    if (cd aztec-bench && nargo execute --package "$pkg") > /dev/null 2>&1; then
+    if nargo execute --package "$pkg" > /dev/null 2>&1; then
         t1=$(python3 -c "import time; print(time.time())")
         witness_ms=$(python3 -c "print(f'{($t1 - $t0) * 1000:.1f}')")
         echo "  Witness gen: ${witness_ms}ms" | tee -a "$RESULTS_FILE"

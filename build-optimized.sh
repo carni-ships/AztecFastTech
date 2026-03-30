@@ -3,10 +3,9 @@
 # Files are backed up before modification and restored on exit (success or failure).
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BB_SRC="$ROOT/barretenberg/cpp/src/barretenberg"
-BB_BUILD="$ROOT/barretenberg/cpp/build"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BB_SRC="$SCRIPT_DIR/barretenberg/cpp/src/barretenberg"
+BB_BUILD="$SCRIPT_DIR/barretenberg/cpp/build"
 BIN_DIR="$SCRIPT_DIR/bin"
 BACKUP_DIR=$(mktemp -d)
 

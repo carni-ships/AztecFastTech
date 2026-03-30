@@ -51,10 +51,11 @@ See [RESEARCH_REPORT.md](RESEARCH_REPORT.md) for the full technical writeup.
 
 ```
 aztec-bench/
+├── barretenberg/           # Git submodule: Metal-accelerated barretenberg fork
 ├── poseidon-hash/          # Noir circuit: 1024-iteration Poseidon2 hash chain (75K gates)
 ├── merkle-tree/            # Noir circuit: 512 hashes + 8 membership proofs (44K gates)
 ├── ec-ops/                 # Noir circuit: 16 Grumpkin scalar multiplications (30K gates)
-├── patches/                # Barretenberg source patches for optimizations
+├── patches/                # Additional optimization patches (applied by build-optimized.sh)
 │   ├── 01-dont-zero-partial-eval.patch
 │   ├── 02-lower-msm-threshold.patch
 │   ├── 03-adaptive-bucket-sort.patch
@@ -79,31 +80,31 @@ aztec-bench/
 
 ## Quick Start
 
-### 1. Build Barretenberg with Metal GPU support
+### 1. Clone with submodules
 
 ```bash
-# Clone barretenberg alongside this repo
-git clone https://github.com/AztecProtocol/barretenberg.git ../barretenberg
+git clone --recurse-submodules https://github.com/carni-ships/AztecFastTech.git
+cd AztecFastTech
+```
 
-# Build with Metal enabled (requires macOS + Apple Silicon)
-cd ../barretenberg/cpp
+### 2. Build Barretenberg with Metal GPU support
+
+```bash
+cd barretenberg/cpp
 cmake --preset default -DCMAKE_BUILD_TYPE=Release
 cmake --build --preset default --target bb
+cd ../..
 ```
 
-### 2. Compile Noir circuits
-
-```bash
-# From aztec-bench/
-nargo compile
-```
-
-### 3. Generate witnesses
+### 3. Compile Noir circuits and generate witnesses
 
 ```bash
 # Poseidon uses a simple seed (already in Prover.toml)
 # Generate witnesses for merkle-tree and ec-ops:
 python3 gen_witnesses.py
+
+# Compile circuits and execute witnesses
+nargo compile
 nargo execute
 ```
 
@@ -113,10 +114,10 @@ nargo execute
 ./bench.sh
 ```
 
-### 5. Build with optimizations and compare
+### 5. Build with additional optimizations and compare
 
 ```bash
-# Apply patches and build optimized binary
+# Apply extra patches (DontZeroMemory, adaptive sort) and rebuild
 ./build-optimized.sh
 
 # Run benchmarks with optimized binary
