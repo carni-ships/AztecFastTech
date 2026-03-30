@@ -16,6 +16,21 @@ Fair baseline without pathology: ~1550ms, giving 1.2x improvement.
 
 **Hardware:** Apple M3 Pro (11-core GPU, 18GB unified memory)
 
+### Hardware Requirements: Aztec Official vs zkMetal
+
+Aztec's official prover infrastructure requires [server-class hardware](https://docs.aztec.network/the_aztec_network/guides/run_nodes/how_to_run_prover):
+
+| Resource | Aztec Prover Agent | zkMetal (M3 Pro laptop) | Reduction |
+|----------|-------------------|--------------------------|-----------|
+| **CPU** | 32 cores / 64 vCPU | 12 cores (6P+6E) | 5.3x fewer cores |
+| **RAM** | 128 GB | 18 GB | 7x less memory |
+| **GPU** | None (CPU-only) | 11-core Apple GPU | Novel acceleration |
+| **Cluster** | ~40 machines | 1 laptop | 40x fewer machines |
+
+Aztec's proving pipeline is entirely CPU-based. A full prover cluster requires approximately 40 machines, each with 32+ cores and 128GB RAM. By offloading multi-scalar multiplication to the Metal GPU, zkMetal achieves competitive proving times for transaction-sized circuits (30K-429K gates) on a single consumer laptop with 7x less RAM.
+
+> **Note:** Aztec's largest circuits (root rollup, ~60GB peak RAM) still exceed consumer hardware. The gains here apply to the common case: client-side proofs, transaction circuits, and function calls that dominate the proving workload.
+
 ## Architecture
 
 The optimization targets Aztec's [Barretenberg](https://github.com/AztecProtocol/barretenberg) UltraHonk prover, specifically the Pippenger MSM algorithm used in polynomial commitment schemes (KZG via Gemini/Shplonk).
