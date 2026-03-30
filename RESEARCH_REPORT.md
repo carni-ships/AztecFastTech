@@ -8,7 +8,7 @@
 
 ## Abstract
 
-We present a systematic optimization of the Aztec Barretenberg UltraHonk zero-knowledge prover targeting Apple Silicon GPUs via the Metal compute framework. Starting from the stock CPU-only prover (v4.1.2), we achieve a **5.1x speedup** on a 75K-gate circuit (755ms to 148ms construct\_proof) and a **3.6x speedup** on a production 428K-gate circuit (3,800ms to 1,050ms wall clock) through a combination of GPU-accelerated multi-scalar multiplication (MSM), memory allocation optimization, thread pool tuning, and systematic elimination of redundant computation. We document 12 successful optimizations, 16 rejected approaches, and a detailed analysis of the hardware performance ceiling on M3 Pro, providing a reference for future GPU-accelerated ZK prover implementations.
+We present a systematic optimization of the Aztec Barretenberg UltraHonk zero-knowledge prover targeting Apple Silicon GPUs via the Metal compute framework. Starting from the stock CPU-only prover (v4.1.2), we achieve a **5.1x speedup** on a 75K-gate circuit (755ms to 148ms construct\_proof) and a **3.6x speedup** on a production 428K-gate circuit (3,800ms to 1,050ms wall clock) through a combination of GPU-accelerated multi-scalar multiplication (MSM), memory allocation optimization, thread pool tuning, and systematic elimination of redundant computation. We document 17 successful optimizations, 16 rejected approaches, and a detailed analysis of the hardware performance ceiling on M3 Pro, providing a reference for future GPU-accelerated ZK prover implementations.
 
 ---
 
@@ -233,7 +233,49 @@ Profiling instrumentation (`info()` calls with `std::chrono` timing and `std::os
 
 The larger savings on the production circuit reflect more PCS operations (more Gemini fold rounds, larger Shplonk quotient).
 
-### 3.8 Build System Optimizations
+### 3.8 GPU Count-Sorted Mapping (CSM)
+
+The count-sorted mapping (CSM) reorders bucket indices so adjacent SIMD threads process buckets of similar size, eliminating thread divergence in the reduce kernel. Initially implemented on CPU (requiring a blocking CPU/GPU sync between sort and reduce), we moved CSM to a dedicated Metal compute kernel `msm_compute_csm`:
+
+**Before (CPU CSM):**
+```
+GPU: GLV → histogram → prefix_sum → scatter
+[HARD SYNC: waitUntilCompleted]
+CPU: CSM computation + imbalance detection + large bucket identification
+GPU: reduce → bucket_sum → combine
+```
+
+**After (GPU CSM):**
+```
+GPU: GLV → histogram → prefix_sum → scatter → CSM
+[waitUntilCompleted]
+GPU: reduce → bucket_sum → combine
+```
+
+The GPU kernel handles three tasks in a single dispatch per window:
+1. Count-sorted mapping via threadgroup-local histogram and descending prefix sum
+2. Bucket imbalance detection (>10% per window, >25% global)
+3. Large bucket identification (count > 256) for parallel reduction
+
+This eliminates ~1-2ms of CPU computation and, more importantly, removes the CPU/GPU synchronization bottleneck that prevented pipelining the sort and reduce phases.
+
+### 3.9 SRS Buffer Caching
+
+The Structured Reference String (SRS) points are immutable across all MSMs within a proof. Rather than re-copying SRS data for each MSM, the GPU context maintains cached pointer and count values (`cached_srs_ptr`, `cached_srs_count`). When consecutive MSMs use the same SRS data (which they always do within a single proof), the memcpy is skipped entirely. This saves ~2-5ms per MSM on the production circuit.
+
+### 3.10 Endomorphism Point Cache
+
+The GLV endomorphism maps each SRS point $G_i$ to $\phi(G_i) = (\beta \cdot x_i, y_i)$. Since SRS points don't change between MSMs, we precompute and cache all endomorphism points in a single GPU dispatch (`glv_precompute_cache`). The cache stores $2n$ points (original + endomorphism) and is invalidated only when the SRS pointer or count changes. Subsequent MSMs apply only the per-scalar sign flags via `glv_apply_neg_flags`, avoiding redundant field multiplications.
+
+### 3.11 Sort-Reduce Batch Overlap
+
+To overlap CPU and GPU work, the counting sort and reduce phases are batched: the CPU sorts the first batch of windows and dispatches GPU reduce (non-blocking), then sorts the second batch while GPU processes the first. This hides ~4ms of CPU sort latency behind the ~20ms GPU reduce, saving ~3-5ms per MSM.
+
+### 3.12 Precomputed Bucket Indices
+
+Bucket index extraction from 256-bit scalars requires bit shifting across 32-byte arrays. Rather than extracting indices twice (once for counting, once for scatter), the extraction is merged with the counting phase and stored as compact uint16 arrays. The scatter phase reads from the precomputed array, avoiding redundant bit manipulation. This saves ~2ms per MSM by halving the scalar memory reads.
+
+### 3.13 Build System Optimizations
 
 #### 3.8.1 Thin LTO
 
@@ -404,7 +446,7 @@ The bucket reduction phase consumes 82% of MSM time. Alternative reduction strat
 
 We demonstrated that Apple Silicon's Metal GPU framework can significantly accelerate zero-knowledge proof generation, achieving 3.6--5.1x speedup on the Barretenberg UltraHonk prover. The key enabler is GPU-accelerated multi-scalar multiplication, which dominates 61--69% of proving time. Our systematic approach---profiling first, measuring every change, and documenting rejected approaches---produced a prover operating within 2--5x of theoretical hardware limits across all major phases.
 
-The 16 documented negative results are arguably as valuable as the 12 successful optimizations: they map the boundary between tractable and intractable GPU acceleration for field-arithmetic-heavy workloads, and demonstrate that the 32-bit ALU limitation of current mobile GPUs creates a fundamental asymmetry favoring CPU execution for operations with high arithmetic intensity per memory access (like sumcheck relation evaluation) while favoring GPU execution for operations with high parallelism and moderate arithmetic intensity (like MSM bucket accumulation).
+The 16 documented negative results are arguably as valuable as the 17 successful optimizations: they map the boundary between tractable and intractable GPU acceleration for field-arithmetic-heavy workloads, and demonstrate that the 32-bit ALU limitation of current mobile GPUs creates a fundamental asymmetry favoring CPU execution for operations with high arithmetic intensity per memory access (like sumcheck relation evaluation) while favoring GPU execution for operations with high parallelism and moderate arithmetic intensity (like MSM bucket accumulation).
 
 ---
 
@@ -422,6 +464,7 @@ The 16 documented negative results are arguably as valuable as the 12 successful
 | 10 | Mar 29 PM | Fused gather-reduce (-85ms), timing cleanup | 1790->1452ms (large) |
 | 11 | Mar 29 EVE | Fixed SIGSEGV, removed dead code, restored LTO | ~310ms / ~1.3s |
 | 12 | Mar 30 | Timing removal, DontZeroMemory (reverted), atomic pool (reverted) | ~3--5% PCS |
+| 13 | Mar 30 | GPU CSM kernel, documentation of undocumented techniques | Eliminates CPU/GPU sync |
 
 ## Appendix B: Profiling Methodology
 

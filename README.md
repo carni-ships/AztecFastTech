@@ -35,15 +35,17 @@ Aztec's proving pipeline is entirely CPU-based. A full prover cluster requires a
 
 The optimization targets Aztec's [Barretenberg](https://github.com/AztecProtocol/barretenberg) UltraHonk prover, specifically the Pippenger MSM algorithm used in polynomial commitment schemes (KZG via Gemini/Shplonk).
 
-Key techniques:
-1. **Metal GPU MSM pipeline** — bucket accumulation via atomic scatter, parallel reduction, and affine-to-Jacobian conversion on GPU
+17 optimization techniques including:
+1. **Metal GPU MSM pipeline** — Pippenger bucket method with 22 GPU kernels for accumulation, reduction, and combination
 2. **GLV endomorphism on GPU** — scalar decomposition moved to Metal compute, halving effective scalar width
-3. **Adaptive window sizing** — per-MSM window selection based on point count, avoiding GPU scheduling pathologies at w=14,15,17
-4. **Per-window bucket imbalance bailout** — detects structured polynomials that cause 1000ms+ GPU stalls, falls back to CPU
-5. **DontZeroMemory** — skip redundant memory zeroing for polynomials immediately overwritten
-6. **Lazy Montgomery reduction** — GPU operates in [0,2p) with boundary normalization, fixing correctness bugs
-7. **Batch polynomial commitments** — overlaps GPU and CPU MSMs via `batch_commit`
-8. **Timing instrumentation removal** — eliminated `std::chrono` + `info()` overhead from PCS hot path
+3. **Count-sorted reduce** — bucket IDs sorted by size to eliminate SIMD thread divergence (60% → 95%+ utilization)
+4. **GPU count-sorted mapping (CSM)** — moved CSM from CPU to GPU kernel, eliminating CPU/GPU sync bottleneck
+5. **SRS buffer + endomorphism caching** — persistent GPU buffers avoid redundant SRS copies and endomorphism recomputation
+6. **Sort-reduce batch overlap** — CPU sorts batch 2 while GPU reduces batch 1, hiding 4ms latency
+7. **Per-window bucket imbalance bailout** — detects structured polynomials causing 1000ms+ GPU stalls, falls back to CPU
+8. **DontZeroMemory** — skip redundant memory zeroing for polynomials immediately overwritten
+9. **Lazy Montgomery reduction** — GPU operates in [0,2p) with boundary normalization, fixing correctness bugs
+10. **Batch polynomial commitments** — overlaps GPU and CPU MSMs via `batch_commit`
 
 See [RESEARCH_REPORT.md](RESEARCH_REPORT.md) for the full technical writeup.
 
