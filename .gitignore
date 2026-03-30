@@ -1,0 +1,29 @@
+# Binaries
+bin/
+*.o
+*.a
+*.dylib
+
+# Build artifacts
+target/
+build/
+*.profraw
+*.profdata
+
+# Metal compiled shaders
+*.metallib
+
+# IDE / editor
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Intermediate report formats
+RESEARCH_REPORT.html

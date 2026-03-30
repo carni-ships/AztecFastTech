@@ -1,0 +1,48 @@
+--- a/cpp/src/barretenberg/ecc/scalar_multiplication/metal/metal_msm.mm
++++ b/cpp/src/barretenberg/ecc/scalar_multiplication/metal/metal_msm.mm
+@@ -403,6 +403,27 @@
+             // Build count-sorted mapping: reorder bucket indices by their point count (descending)
+             // so that adjacent GPU threads in a SIMD group process buckets of similar size.
+             // This eliminates thread divergence that causes catastrophic slowdowns on M3 Pro.
++            // Adaptive: skip sorting when bucket distribution is already uniform (random scalars).
++            // Compute coefficient of variation across all windows to detect imbalance.
++            {
++                bool needs_sorting = false;
++                for (size_t w = 0; w < n_windows && !needs_sorting; w++) {
++                    size_t w_off = w * n_buckets;
++                    uint64_t sum = 0, sum_sq = 0;
++                    for (size_t b = 0; b < n_buckets; b++) {
++                        uint64_t c = all_counts[w_off + b];
++                        sum += c;
++                        sum_sq += c * c;
++                    }
++                    // CV^2 = variance / mean^2 = (E[X^2] - E[X]^2) / E[X]^2
++                    // For uniform distribution, CV^2 ~ 1/mean ~ n_buckets/n2, which is small.
++                    // For structured data, CV^2 >> 1. Threshold: CV^2 > 0.5 means significant imbalance.
++                    double mean = static_cast<double>(sum) / n_buckets;
++                    double mean_sq = static_cast<double>(sum_sq) / n_buckets;
++                    double cv_sq = (mean_sq - mean * mean) / (mean * mean + 1e-10);
++                    if (cv_sq > 0.5) needs_sorting = true;
++                }
++
++                auto* csm = static_cast<uint32_t*>([count_sorted_map_buffer contents]);
++                if (!needs_sorting) {
++                    // Identity mapping: bucket i maps to position i (no reordering needed)
++                    for (size_t i = 0; i < n_buckets * n_windows; i++) {
++                        csm[i] = static_cast<uint32_t>(i);
++                    }
++                } else {
+             // Fall back to CPU only for truly pathological cases (>25% in one bucket).
+-            {
+-                auto* csm = static_cast<uint32_t*>([count_sorted_map_buffer contents]);
+                 uint32_t max_bucket_count = 0;
+
+                 for (size_t w = 0; w < n_windows; w++) {
+@@ -440,6 +461,7 @@
+                         pos[c]++;
+                     }
+                 }
++                } // end else (needs_sorting)
+
+                 // Only fall back for truly pathological cases (>25% in one non-zero bucket)
+                 if (max_bucket_count > n2 / 4) {

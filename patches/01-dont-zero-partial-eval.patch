@@ -1,0 +1,12 @@
+--- a/cpp/src/barretenberg/flavor/partially_evaluated_multivariates.hpp
++++ b/cpp/src/barretenberg/flavor/partially_evaluated_multivariates.hpp
+@@ -33,7 +33,8 @@
+         for (auto [poly, full_poly] : zip_view(this->get_all(), full_polynomials.get_all())) {
+             // After the initial sumcheck round, the new size is CEIL(size/2).
+             size_t desired_size = (full_poly.end_index() / 2) + (full_poly.end_index() % 2);
+-            poly = Polynomial(desired_size, circuit_size / 2);
++            // DontZeroMemory: partially_evaluate overwrites every element, zeroing is wasted work
++            poly = Polynomial(desired_size, circuit_size / 2, Polynomial::DontZeroMemory::FLAG);
+         }
+     }
+ };

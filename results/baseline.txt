@@ -1,0 +1,40 @@
+=== zkMetal Aztec Benchmark Suite ===
+Date: 2026-03-29 17:04:42 UTC
+Machine: Apple M3 Pro
+Cores: 12
+RAM: 18 GB
+nargo: nargo version = 1.0.0-beta.18
+bb: 00000000.00000000.00000000 (local Metal-enabled build)
+
+━━━ bench_poseidon ━━━
+  ACIR opcodes: 1026
+  Circuit size (gates): 74790
+  Witness gen: skipped (using cached witness)
+  Prove (UltraHonk, no-zk): 368.7ms
+  Verify: 45.2ms
+  Proof size: 13120 bytes
+
+━━━ bench_merkle ━━━
+  ACIR opcodes: 602
+  Circuit size (gates): 43837
+  Witness gen: skipped (using cached witness)
+  Prove (UltraHonk, no-zk): 484.0ms
+  Verify: 44.7ms
+  Proof size: 13120 bytes
+
+━━━ bench_ec_ops ━━━
+  ACIR opcodes: 162
+  Circuit size (gates): 29929
+  Witness gen: skipped (using cached witness)
+  Prove (UltraHonk, no-zk): 328.7ms
+  Verify: 44.9ms
+  Proof size: 13120 bytes
+
+━━━ persistia_incremental_proof (production circuit) ━━━
+  ACIR opcodes: 21312
+  Circuit size (gates): 428729
+  Prove (UltraHonk, no-zk): 2313.0ms
+  Verify: 45.2ms
+  Proof size: 13120 bytes
+
+=== Benchmark Complete ===
