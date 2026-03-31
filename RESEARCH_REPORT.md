@@ -504,7 +504,7 @@ The 16 documented negative results are arguably as valuable as the 17 successful
 
 ## Appendix B: Profiling Methodology
 
-All measurements use `time(1)` wall clock with interleaved A/B comparison (alternating old/new binary runs to control for thermal and system load variation). CPU profiling uses macOS `sample(1)` at 1ms intervals. GPU profiling uses Metal System Trace via `xctrace`. Statistical significance requires $\geq$3 consecutive runs with median comparison and outlier exclusion.
+All measurements use `time(1)` wall clock with interleaved A/B comparison (alternating old/new binary runs to control for thermal and system load variation). CPU profiling uses macOS `sample(1)` at 1ms intervals. GPU profiling uses Metal System Trace via `xctrace`. Statistical significance requires ≥3 consecutive runs with median comparison and outlier exclusion.
 
 ## Appendix C: File Manifest
 
