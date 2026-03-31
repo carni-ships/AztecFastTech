@@ -60,6 +60,10 @@ The stock Barretenberg prover is CPU-only, achieving ~755ms wall clock time for 
 | Sumcheck rounds | 17 | 19 |
 | MSM point count | ~131K | ~524K |
 
+**Small circuit** (`bench_poseidon`): A synthetic benchmark performing 1024 sequential Poseidon2 hashes, exercising the algebraic hash gates that dominate Aztec's note commitment and nullifier computation.
+
+**Production circuit** (428K gates): A full application circuit combining Poseidon2 hashing, Merkle membership proofs, Schnorr signature verification, and encrypted note construction — representative of the operations in an Aztec private transaction. This circuit exercises all major constraint types in UltraHonk: arithmetic gates, lookup tables (for range checks and hash rounds), elliptic curve operations (for signatures and Pedersen commitments), and auxiliary gates.
+
 ### 2.3 Build Configuration
 
 All measurements use Release builds with `-O3 -mcpu=native -flto=thin` via both `CMAKE_CXX_FLAGS` and `CMAKE_EXE_LINKER_FLAGS`. We discovered that thin LTO is critical: without it, the binary bloats from 19MB to 24MB with 33% more symbols and ~60ms regression. PGO instrumentation (`-fprofile-instr-generate`) was tested and rejected due to 7.4x binary bloat and runtime overhead.
