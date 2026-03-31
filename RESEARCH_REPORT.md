@@ -6,6 +6,8 @@
 
 ---
 
+**[Jump to Results](#5-results)**
+
 ## Abstract
 
 We present a systematic optimization of the Aztec Barretenberg UltraHonk zero-knowledge prover targeting Apple Silicon GPUs via the Metal compute framework. Starting from the stock CPU-only prover (v4.1.2), we achieve a **5.1x speedup** on a 75K-gate circuit (755ms to 148ms construct\_proof) and a **3.6x speedup** on a production 428K-gate circuit (3,800ms to 1,050ms wall clock) through a combination of GPU-accelerated multi-scalar multiplication (MSM), memory allocation optimization, thread pool tuning, and systematic elimination of redundant computation. We document 17 successful optimizations, 16 rejected approaches, and a detailed analysis of the hardware performance ceiling on M3 Pro, providing a reference for future GPU-accelerated ZK prover implementations.
