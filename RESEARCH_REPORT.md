@@ -2,7 +2,7 @@
 
 **Authors:** Carnation, with Claude
 **Date:** 2026
-**Platform:** Apple M3 Pro (12 CPU cores, 18 GPU cores, 18GB unified memory)
+**Platform:** Apple M3 Pro (12 CPU cores, 18-core GPU, 18GB unified memory)
 
 ---
 
@@ -373,6 +373,22 @@ The following approaches were investigated and rejected with measured evidence:
 | CPU sumcheck throughput | ~180 ns/edge | ~176 ns/edge |
 | Memory bandwidth utilization | ~40 GB/s | ~40 GB/s |
 | GPU ALU utilization (est.) | ~70% | ~70% |
+
+### 5.5 Real Aztec Protocol Circuit: parity-base (2.27M gates)
+
+To validate results on production Aztec circuits, we benchmarked against `parity-base` from [aztec-packages v4.1.2](https://github.com/AztecProtocol/aztec-packages/tree/v4.1.2). This circuit computes SHA256 hashes and Poseidon Merkle roots over 256 L1-to-L2 messages, producing a 2.27M-gate UltraHonk circuit (dyadic size 4,194,304).
+
+At this scale, the proving pipeline generates 10 PCS-phase MSMs: 8 Gemini fold commitments (sizes halving from 4,194,304 to 32,768) and 2 Shplonk quotient commitments at 4,194,304. The Oink-phase wire commitments use structured scalars that trigger bucket imbalance, so `commit()` is called with `prefer_gpu=false` to skip GPU dispatch for those polynomials.
+
+| Configuration | Wall Clock | CPU User Time | Peak Memory |
+|---------------|-----------|---------------|-------------|
+| CPU only (`BB_NO_GPU=1`) | ~13.4s | 94.6s | 6,315 MiB |
+| **GPU (all PCS MSMs)** | **~12.0s** | **45.7s** | **6,282 MiB** |
+| **Speedup** | **1.12x** | **2.07x** | -- |
+
+The 12% wall-clock improvement is modest because MSM is a smaller fraction of total proving time at 2.27M gates — sumcheck (19 rounds over 4M+ edges) and memory operations grow proportionally. However, the 52% reduction in CPU user time (94.6s → 45.7s) demonstrates that the GPU is offloading significant compute. This frees CPU cores for other work in a multi-proof pipeline.
+
+**Key finding at this scale:** A threshold mismatch between the GPU CSM kernel (dynamic threshold) and the `reduce_gathered` kernel (hardcoded `LARGE_BUCKET_THRESHOLD = 256`) caused silent data loss at n=4,194,304 where the average bucket count (~256) meant roughly half of all buckets fell into a gap between the two thresholds. The fix was to pass the dynamic threshold to `reduce_gathered`, ensuring both kernels agree on which buckets are "large". This bug only manifested at n ≥ 2^22 because at smaller sizes, no bucket count exceeds 256.
 
 ---
 

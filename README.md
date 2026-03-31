@@ -6,11 +6,15 @@ Hardware-accelerated UltraHonk (BN254) proving using Apple Metal compute shaders
 
 ### Synthetic Circuits (Aztec-representative operations)
 
+Wall clock time including circuit construction, proving, and I/O:
+
 | Circuit | Gates | Baseline (CPU) | Optimized (Metal GPU) | Speedup |
 |---------|------:|---------------:|----------------------:|--------:|
 | Poseidon hash chain | 75K | 538ms | 310ms | 1.7x |
 | Merkle tree proofs | 44K | 343ms | 270ms | 1.3x |
 | EC scalar muls | 30K | 265ms | 210ms | 1.3x |
+
+The research report measures `construct_proof` time (cryptographic proving only, excluding I/O): **148ms** for the 75K-gate Poseidon circuit and **815ms** for the 428K-gate production circuit, representing **5.1x** and **3.6x** speedups respectively over stock Barretenberg.
 
 ### Real Aztec Protocol Circuits (from aztec-packages v4.1.2)
 
@@ -20,7 +24,7 @@ Hardware-accelerated UltraHonk (BN254) proving using Apple Metal compute shaders
 
 The `parity-base` circuit computes SHA256 + Poseidon Merkle roots over 256 L1-to-L2 messages. At 2.27M gates it is the largest UltraHonk circuit benchmarked. GPU acceleration offloads all 10 PCS-phase MSMs (including 3 at n=4,194,304), reducing CPU utilization by 52% (94.6s → 45.7s user time).
 
-**Hardware:** Apple M3 Pro (11-core GPU, 18GB unified memory)
+**Hardware:** Apple M3 Pro (18-core GPU, 18GB unified memory)
 
 ### Hardware Requirements: Aztec Official vs AztecFastTech
 
@@ -99,10 +103,10 @@ cd AztecFastTech
 ### 2. Build Barretenberg with Metal GPU support
 
 ```bash
-cd barretenberg/cpp
-cmake --preset default -DCMAKE_BUILD_TYPE=Release
-cmake --build --preset default --target bb
-cd ../..
+cd barretenberg/barretenberg/cpp
+cmake --preset default -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-O3 -mcpu=native"
+cmake --build --preset default --target bb -j$(sysctl -n hw.ncpu)
+cd ../../..
 ```
 
 ### 3. Compile Noir circuits and generate witnesses
@@ -229,8 +233,8 @@ bb prove -b target/parity_base.json -w target/parity_base.gz -o proof
 
 The full technical report covers:
 - System architecture and UltraHonk prover pipeline
-- 8 successful optimization techniques with implementation details
-- 16 rejected approaches and why they failed
+- 17 successful optimization techniques with implementation details
+- 16 rejected approaches with measured evidence
 - Performance ceiling analysis (GPU ALU-bound at 61%, CPU ALU-bound at 23%)
 - Lessons learned about Apple Metal compute for cryptographic workloads
 
