@@ -153,6 +153,78 @@ These exercise the core operations in Aztec's proving workload: Poseidon2 hashin
 
 Pre-compiled artifacts are included in `target/`. To regenerate from source, see [aztec-packages](https://github.com/AztecProtocol/aztec-packages) at tag `v4.1.2`.
 
+## Building a GPU-Accelerated Aztec Prover
+
+You can use this repo to build a Metal-accelerated `bb` binary that serves as a drop-in replacement for Barretenberg's stock prover. This works with any Noir circuit targeting the UltraHonk backend.
+
+### Build the prover
+
+```bash
+git clone --recurse-submodules https://github.com/carni-ships/AztecFastTech.git
+cd AztecFastTech
+
+# Build barretenberg with Metal GPU support
+cd barretenberg/barretenberg/cpp
+cmake --preset default -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-O3 -mcpu=native"
+cmake --build --preset default --target bb -j$(sysctl -n hw.ncpu)
+cd ../../..
+```
+
+The resulting binary is at `barretenberg/barretenberg/cpp/build/bin/bb`.
+
+### Use with any Noir circuit
+
+```bash
+# Compile your circuit
+nargo compile
+
+# Execute witness
+nargo execute
+
+# Prove (GPU acceleration is automatic — no flags needed)
+bb prove -b target/<circuit>.json -w target/<circuit>.gz -o proof
+
+# Verify
+bb verify -k vk -p proof/proof -i proof/public_inputs
+```
+
+The GPU pipeline activates automatically for MSMs with 32K+ points (typical for circuits above ~60K gates). Smaller circuits stay on CPU where it's faster. If the GPU encounters bucket imbalance (common with structured witness polynomials), it falls back to CPU transparently.
+
+### Use with Aztec protocol circuits
+
+```bash
+# Fetch and compile real Aztec circuits (requires nargo 1.0.0-beta.18+)
+./setup-aztec-circuits.sh
+
+# Prove parity-base (2.27M gates)
+bb prove -b target/parity_base.json -w target/parity_base.gz -o proof
+```
+
+### Apply additional optimizations
+
+```bash
+# Build with DontZeroMemory and other patches
+./build-optimized.sh
+
+# Use the optimized binary
+./bin/bb-opt prove -b target/<circuit>.json -w target/<circuit>.gz -o proof
+```
+
+### Requirements
+
+- macOS on Apple Silicon (M1/M2/M3/M4)
+- Xcode command line tools (for Metal compiler and C++ toolchain)
+- CMake and Ninja (`brew install cmake ninja`)
+- [Noir](https://noir-lang.org/) nargo (`noirup` to install) — for circuit compilation only
+
+### Environment variables
+
+| Variable | Effect |
+|----------|--------|
+| `BB_NO_GPU=1` | Disable GPU, use CPU-only proving |
+| `BB_GPU_PROFILE=1` | Print per-MSM GPU timing |
+| `BB_GPU_PROFILE=2` | Print per-phase GPU timing (glv, sort, csm, reduce, sum, combine) |
+
 ## Research Report
 
 The full technical report covers:
