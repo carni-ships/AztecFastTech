@@ -1,0 +1,9 @@
+=== AztecFastTech Benchmark Suite ===
+Date: [redacted]
+Machine: Apple M3 Pro
+Cores: 12
+RAM: 18 GB
+nargo: nargo version = 1.0.0-beta.18
+bb: 00000000.00000000.00000000 (local Metal-enabled build)
+
+━━━ bench_poseidon ━━━

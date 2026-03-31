@@ -1,7 +1,7 @@
 # GPU-Accelerated Zero-Knowledge Proving on Apple Silicon: Optimizing the Barretenberg UltraHonk Prover with Metal
 
 **Authors:** Carnation, with Claude (Anthropic)
-**Date:** March 30, 2026
+**Date:** 2026
 **Platform:** Apple M3 Pro (12 CPU cores, 18 GPU cores, 18GB unified memory)
 
 ---
@@ -46,7 +46,7 @@ The stock Barretenberg prover is CPU-only, achieving ~755ms wall clock time for 
 | CPU | Apple M3 Pro, 6P+6E cores (12 total) |
 | GPU | Apple M3 Pro, 18 cores, Metal 4 |
 | Memory | 18GB unified LPDDR5, ~160GB/s bandwidth |
-| OS | macOS 26.3 (Darwin 25.3.0) |
+| OS | macOS (Apple Silicon) |
 
 ### 2.2 Proof System Parameters
 
@@ -474,7 +474,7 @@ The 41 ecMul calls (one per polynomial commitment) dominate at 56% of gas. Unlik
 - EIP-7904 pairing repricing (~5x reduction, proposed for Glamsterdam)
 - Recursive proof wrapping (Honk → UltraPlonk for fewer on-chain commitments)
 
-**Current USD costs:** At 0.5 gwei gas price and \$2,071 ETH (March 2026), a single rollup proof verification costs \$0.0005. Per-user cost in a 256-transaction batch is \$0.000005.
+**Current USD costs:** At 0.5 gwei gas price and ~\$2,000 ETH, a single rollup proof verification costs ~\$0.0005. Per-user cost in a 256-transaction batch is ~\$0.000005.
 
 ---
 
@@ -490,17 +490,17 @@ The 16 documented negative results are arguably as valuable as the 17 successful
 
 | Session | Date | Key Changes | Result |
 |---------|------|-------------|--------|
-| 1 | Mar 28 AM | GPU bucket\_sum (225->23ms), GPU GLV (12->3.5ms), merged command buffer | 3850->1050ms |
-| 2 | Mar 28 PM | skip\_imbalance\_check, parallel Shplonk, wire skip\_gpu | 1050ms stable |
-| 3 | Mar 28 PM | GPU counting sort, DontZeroMemory, prewarm, per-window bailout | 1550->1466ms |
-| 4 | Mar 28 EVE | Count-sorted reduce, batched sort-reduce overlap | ~380ms (small) |
-| 5--7 | Mar 29 AM | GPU GLV decompose, 512-segment combine, unified pipeline | 165->85ms MSM |
-| 8 | Mar 29 PM | Async Metal init, non-blocking prewarm | ~300ms (small) |
-| 9 | Mar 29 PM | GPU-only batch preconversion, spin-wait thread pool | ~240ms (small) |
-| 10 | Mar 29 PM | Fused gather-reduce (-85ms), timing cleanup | 1790->1452ms (large) |
-| 11 | Mar 29 EVE | Fixed SIGSEGV, removed dead code, restored LTO | ~310ms / ~1.3s |
-| 12 | Mar 30 | Timing removal, DontZeroMemory (reverted), atomic pool (reverted) | ~3--5% PCS |
-| 13 | Mar 30 | GPU CSM kernel, documentation of undocumented techniques | Eliminates CPU/GPU sync |
+| 1 | -- | GPU bucket\_sum (225->23ms), GPU GLV (12->3.5ms), merged command buffer | 3850->1050ms |
+| 2 | -- | skip\_imbalance\_check, parallel Shplonk, wire skip\_gpu | 1050ms stable |
+| 3 | -- | GPU counting sort, DontZeroMemory, prewarm, per-window bailout | 1550->1466ms |
+| 4 | -- | Count-sorted reduce, batched sort-reduce overlap | ~380ms (small) |
+| 5--7 | -- | GPU GLV decompose, 512-segment combine, unified pipeline | 165->85ms MSM |
+| 8 | -- | Async Metal init, non-blocking prewarm | ~300ms (small) |
+| 9 | -- | GPU-only batch preconversion, spin-wait thread pool | ~240ms (small) |
+| 10 | -- | Fused gather-reduce (-85ms), timing cleanup | 1790->1452ms (large) |
+| 11 | -- | Fixed SIGSEGV, removed dead code, restored LTO | ~310ms / ~1.3s |
+| 12 | -- | Timing removal, DontZeroMemory (reverted), atomic pool (reverted) | ~3--5% PCS |
+| 13 | -- | GPU CSM kernel, documentation of undocumented techniques | Eliminates CPU/GPU sync |
 
 ## Appendix B: Profiling Methodology
 

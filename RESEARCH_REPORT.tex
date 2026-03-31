@@ -27,7 +27,7 @@
 
 \title{GPU-Accelerated Zero-Knowledge Proving on Apple Silicon:\\Optimizing the Barretenberg UltraHonk Prover with Metal}
 \author{Carnation, with Claude (Anthropic)}
-\date{March 30, 2026}
+\date{2026}
 
 \begin{document}
 
@@ -82,7 +82,7 @@ The stock Barretenberg prover is CPU-only, achieving $\sim$755ms wall clock time
 CPU & Apple M3 Pro, 6P+6E cores (12 total) \\
 GPU & Apple M3 Pro, 18 cores, Metal 4 \\
 Memory & 18GB unified LPDDR5, $\sim$160GB/s bandwidth \\
-OS & macOS 26.3 (Darwin 25.3.0) \\
+OS & macOS (Apple Silicon) \\
 \bottomrule
 \end{tabular}
 \caption{Hardware platform specifications.}
@@ -396,16 +396,16 @@ The 16 documented negative results map the boundary between tractable and intrac
 \toprule
 \textbf{Session} & \textbf{Date} & \textbf{Key Changes} & \textbf{Result} \\
 \midrule
-1 & Mar 28 AM & GPU bucket\_sum, GLV, merged CB & 3850$\to$1050ms \\
-2 & Mar 28 PM & skip\_imbalance, parallel Shplonk & 1050ms stable \\
-3 & Mar 28 PM & GPU sort, DontZeroMemory, prewarm & 1550$\to$1466ms \\
-4 & Mar 28 EVE & Count-sorted reduce, overlap & $\sim$380ms (small) \\
-5--7 & Mar 29 AM & GPU GLV, 512-seg combine & 165$\to$85ms MSM \\
-8 & Mar 29 PM & Async Metal init, prewarm & $\sim$300ms (small) \\
-9 & Mar 29 PM & GPU-only preconvert, spin-wait & $\sim$240ms (small) \\
-10 & Mar 29 PM & Fused gather-reduce & 1790$\to$1452ms \\
-11 & Mar 29 EVE & Fixed SIGSEGV, dead code, LTO & $\sim$310ms / $\sim$1.3s \\
-12 & Mar 30 & Timing removal & $\sim$3--5\% PCS \\
+1 & -- & GPU bucket\_sum, GLV, merged CB & 3850$\to$1050ms \\
+2 & -- & skip\_imbalance, parallel Shplonk & 1050ms stable \\
+3 & -- & GPU sort, DontZeroMemory, prewarm & 1550$\to$1466ms \\
+4 & -- & Count-sorted reduce, overlap & $\sim$380ms (small) \\
+5--7 & -- & GPU GLV, 512-seg combine & 165$\to$85ms MSM \\
+8 & -- & Async Metal init, prewarm & $\sim$300ms (small) \\
+9 & -- & GPU-only preconvert, spin-wait & $\sim$240ms (small) \\
+10 & -- & Fused gather-reduce & 1790$\to$1452ms \\
+11 & -- & Fixed SIGSEGV, dead code, LTO & $\sim$310ms / $\sim$1.3s \\
+12 & -- & Timing removal & $\sim$3--5\% PCS \\
 \bottomrule
 \end{tabular}
 \caption{Optimization session timeline.}
