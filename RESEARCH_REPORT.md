@@ -442,7 +442,43 @@ The bucket reduction phase consumes 82% of MSM time. Alternative reduction strat
 
 ---
 
-## 9. Conclusion
+## 9. Verification Cost Analysis
+
+### 9.1 Native Verification
+
+The UltraHonk native verifier runs in **~10ms** on M3 Pro, dominated by a single 77-point MSM and one BN254 pairing check. The O(log N) verification complexity is a fundamental property of the SNARK protocol---there is no meaningful optimization target. GPU acceleration is counterproductive: the 77-point MSM is 400x below our GPU dispatch threshold (32,768 points), and kernel launch overhead would exceed the computation itself.
+
+### 9.2 On-Chain (Solidity) Verification
+
+On-chain verification presents a different cost structure measured in EVM gas rather than wall time:
+
+| Operation | Gas/call | Calls | Total | Share |
+|-----------|---------|-------|-------|-------|
+| ecMul (0x07) | 6,000 | ~41 | ~246,000 | 56% |
+| ecPairing (0x08) | 113,000 | 1 | ~113,000 | 26% |
+| ecAdd (0x06) | 150 | ~80 | ~12,000 | 3% |
+| Sumcheck + field ops | --- | --- | ~60,000 | 14% |
+| **Total** | | | **~436,000** | |
+
+The 41 ecMul calls (one per polynomial commitment) dominate at 56% of gas. Unlike native MSM where GPU parallelism helps, EVM precompiles are fixed-cost---no acceleration path exists within the current EVM.
+
+**Existing optimizations in the Solidity verifier:**
+- Assembly-level ecAdd/ecMul dispatch (>10K gas savings)
+- Montgomery batch inversion (1 modexp instead of ~40)
+- Manual memory slab allocation
+- Loop unrolling in barycentric evaluation
+- Challenge splitting (254-bit hash → 2×127-bit challenges)
+
+**Remaining optimization levers (all protocol-level):**
+- Reduce polynomial commitment count (each removal saves 6K gas)
+- EIP-7904 pairing repricing (~5x reduction, proposed for Glamsterdam)
+- Recursive proof wrapping (Honk → UltraPlonk for fewer on-chain commitments)
+
+**Current USD costs:** At 0.5 gwei gas price and \$2,071 ETH (March 2026), a single rollup proof verification costs \$0.0005. Per-user cost in a 256-transaction batch is \$0.000005.
+
+---
+
+## 10. Conclusion
 
 We demonstrated that Apple Silicon's Metal GPU framework can significantly accelerate zero-knowledge proof generation, achieving 3.6--5.1x speedup on the Barretenberg UltraHonk prover. The key enabler is GPU-accelerated multi-scalar multiplication, which dominates 61--69% of proving time. Our systematic approach---profiling first, measuring every change, and documenting rejected approaches---produced a prover operating within 2--5x of theoretical hardware limits across all major phases.
 
