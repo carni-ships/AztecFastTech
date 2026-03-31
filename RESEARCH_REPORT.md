@@ -1,6 +1,6 @@
 # GPU-Accelerated Zero-Knowledge Proving on Apple Silicon: Optimizing the Barretenberg UltraHonk Prover with Metal
 
-**Authors:** Carnation, with Claude (Anthropic)
+**Authors:** Carnation, with Claude
 **Date:** 2026
 **Platform:** Apple M3 Pro (12 CPU cores, 18 GPU cores, 18GB unified memory)
 
