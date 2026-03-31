@@ -6,6 +6,7 @@ bin/
 
 # Build artifacts
 target/
+.aztec-packages/
 build/
 barretenberg/cpp/build/
 *.profraw
@@ -13,6 +14,9 @@ barretenberg/cpp/build/
 
 # Metal compiled shaders
 *.metallib
+
+# Internal dev notes
+memory/
 
 # IDE / editor
 .claude/

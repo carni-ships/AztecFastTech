@@ -25,7 +25,7 @@ Optimizations applied:
   Prove (UltraHonk, no-zk): 209.7ms  (baseline: 265.0ms, -20.9%)
     Oink: 95.4ms  Sumcheck: 20.3ms  PCS: 94.0ms
 
-━━━ persistia_incremental_proof (production circuit) ━━━
+━━━ production circuit (428K gates) ━━━
   Circuit size (gates): 428729
   Prove (UltraHonk, no-zk): 1465.6ms  (baseline: 4716.9ms*, -68.9%*)
     Oink: 816.6ms  Sumcheck: 156.5ms  PCS: 492.5ms

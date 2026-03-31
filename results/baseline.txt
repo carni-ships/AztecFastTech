@@ -30,7 +30,7 @@ bb: 00000000.00000000.00000000 (local Metal-enabled build)
   Verify: 44.9ms
   Proof size: 13120 bytes
 
-━━━ persistia_incremental_proof (production circuit) ━━━
+━━━ production circuit (428K gates) ━━━
   ACIR opcodes: 21312
   Circuit size (gates): 428729
   Prove (UltraHonk, no-zk): 2313.0ms

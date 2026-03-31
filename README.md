@@ -1,18 +1,24 @@
 # AztecFastTech: GPU-Accelerated ZK Proving on Apple Silicon
 
-Hardware-accelerated UltraHonk (BN254) proving using Apple Metal compute shaders on M-series chips. This project demonstrates a **3.8x speedup** on production Aztec circuits by offloading multi-scalar multiplication (MSM) to the GPU via a custom Metal compute pipeline.
+Hardware-accelerated UltraHonk (BN254) proving using Apple Metal compute shaders on M-series chips. This project benchmarks GPU-accelerated proving on both synthetic circuits and real Aztec protocol circuits.
 
 ## Results
+
+### Synthetic Circuits (Aztec-representative operations)
 
 | Circuit | Gates | Baseline (CPU) | Optimized (Metal GPU) | Speedup |
 |---------|------:|---------------:|----------------------:|--------:|
 | Poseidon hash chain | 75K | 538ms | 310ms | 1.7x |
 | Merkle tree proofs | 44K | 343ms | 270ms | 1.3x |
 | EC scalar muls | 30K | 265ms | 210ms | 1.3x |
-| Production (Persistia) | 429K | 4717ms* | 1250ms | 3.8x |
 
-*Baseline includes GPU scheduling pathology on structured polynomials (M3 Pro specific).
-Fair baseline without pathology: ~1550ms, giving 1.2x improvement.
+### Real Aztec Protocol Circuits (from aztec-packages v4.1.2)
+
+| Circuit | Gates | Baseline (CPU) | Optimized (Metal GPU) | Speedup |
+|---------|------:|---------------:|----------------------:|--------:|
+| parity-base | 2.27M | ~13.4s | ~12.0s | 1.12x |
+
+The `parity-base` circuit computes SHA256 + Poseidon Merkle roots over 256 L1-to-L2 messages. At 2.27M gates it is the largest UltraHonk circuit benchmarked. GPU acceleration offloads all 10 PCS-phase MSMs (including 3 at n=4,194,304), reducing CPU utilization by 52% (94.6s → 45.7s user time).
 
 **Hardware:** Apple M3 Pro (11-core GPU, 18GB unified memory)
 
@@ -64,6 +70,7 @@ AztecFastTech/
 │   ├── apply_adaptive_sort.py
 │   └── apply_per_window_bailout.py
 ├── bench.sh                # Benchmark runner (compile, prove, verify)
+├── setup-aztec-circuits.sh # Fetch and compile real Aztec protocol circuits
 ├── build-optimized.sh      # Build optimized bb binary with patches applied
 ├── gen_witnesses.py        # Generate witness files for merkle-tree and ec-ops circuits
 ├── results/                # Benchmark results (baseline vs optimized)
@@ -128,13 +135,23 @@ BB_LOCAL=./bin/bb-opt ./bench.sh
 
 ## Benchmark Circuits
 
-| Circuit | Description | Constraint System |
-|---------|-------------|-------------------|
-| **poseidon-hash** | 1024 sequential Poseidon2 hashes | Heavy algebraic constraints, exercises hash gates |
-| **merkle-tree** | 512 hashes + 8 Merkle membership proofs | Mixed hash + comparison constraints |
-| **ec-ops** | 16 Grumpkin scalar multiplications | Embedded curve operations, exercises bigint arithmetic |
+### Synthetic (Aztec-representative)
 
-These circuits are representative of Aztec's proving workload: Poseidon2 hashing dominates note commitments and nullifier computation, Merkle proofs verify state inclusion, and EC operations handle Schnorr signatures and Pedersen commitments.
+| Circuit | Description | Gates |
+|---------|-------------|------:|
+| **poseidon-hash** | 1024 sequential Poseidon2 hashes | 75K |
+| **merkle-tree** | 512 hashes + 8 Merkle membership proofs | 44K |
+| **ec-ops** | 16 Grumpkin scalar multiplications | 30K |
+
+These exercise the core operations in Aztec's proving workload: Poseidon2 hashing (note commitments, nullifiers), Merkle proofs (state inclusion), and EC operations (Schnorr signatures, Pedersen commitments).
+
+### Real Aztec Protocol Circuits
+
+| Circuit | Description | Gates | Source |
+|---------|-------------|------:|--------|
+| **parity-base** | SHA256 + Poseidon Merkle root over 256 L1-to-L2 messages | 2.27M | aztec-packages v4.1.2 |
+
+Pre-compiled artifacts are included in `target/`. To regenerate from source, see [aztec-packages](https://github.com/AztecProtocol/aztec-packages) at tag `v4.1.2`.
 
 ## Research Report
 

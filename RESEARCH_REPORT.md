@@ -52,7 +52,7 @@ The stock Barretenberg prover is CPU-only, achieving ~755ms wall clock time for 
 
 | Parameter | Small Circuit | Production Circuit |
 |-----------|--------------|-------------------|
-| Circuit | bench\_poseidon | persistia\_incremental |
+| Circuit | bench\_poseidon | production (428K gates) |
 | Gates | 75,265 | 428,032 |
 | Dyadic size | 131,072 (2^17) | 524,288 (2^19) |
 | Sumcheck rounds | 17 | 19 |
@@ -229,7 +229,7 @@ Profiling instrumentation (`info()` calls with `std::chrono` timing and `std::os
 | Circuit | Savings |
 |---------|---------|
 | bench\_poseidon (75K gates) | ~5--8ms |
-| persistia (428K gates) | ~40--74ms (3--5%) |
+| production (428K gates) | ~40--74ms (3--5%) |
 
 The larger savings on the production circuit reflect more PCS operations (more Gemini fold rounds, larger Shplonk quotient).
 
@@ -316,7 +316,7 @@ The following approaches were investigated and rejected with measured evidence:
 
 ### 5.1 Overall Performance
 
-| Configuration | bench\_poseidon (75K gates) | persistia (428K gates) |
+| Configuration | bench\_poseidon (75K gates) | production (428K gates) |
 |---------------|---------------------------|----------------------|
 | Stock bb v4.1.2 (CPU-only) | 755ms wall / 4.95s CPU | ~3,800ms wall |
 | Session 4 (GPU MSM + batching) | ~380ms | -- |
@@ -339,7 +339,7 @@ The following approaches were investigated and rejected with measured evidence:
 | PCS (Gemini + Shplonk + KZG) | 122ms | 39% |
 | **Total construct\_proof** | **311ms** | **100%** |
 
-#### Production Circuit (persistia\_incremental, 524K dyadic)
+#### Production Circuit (428K gates, 524K dyadic)
 
 | Phase | Time | % of Total |
 |-------|------|-----------|
