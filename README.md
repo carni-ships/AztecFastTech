@@ -37,9 +37,9 @@ Aztec's official prover infrastructure requires [server-class hardware](https://
 | **GPU** | None (CPU-only) | 18-core Apple GPU | Novel acceleration |
 | **Cluster** | ~40 machines | 1 laptop | 40x fewer machines |
 
-Aztec's proving pipeline is entirely CPU-based. A full prover cluster requires approximately 40 machines, each with 32+ cores and 128GB RAM. By offloading multi-scalar multiplication to the Metal GPU, AztecFastTech achieves competitive proving times for transaction-sized circuits (30K-429K gates) on a single consumer laptop with 7x less RAM.
+Aztec's proving pipeline is entirely CPU-based. A full prover cluster requires approximately 40 machines, each with 32+ cores and 128GB RAM. By offloading multi-scalar multiplication to the Metal GPU, AztecFastTech achieves competitive proving times on a single consumer laptop with 7x less RAM — from transaction-sized circuits (30K-429K gates) up to the 2.27M-gate parity-base circuit.
 
-> **Note:** Aztec's largest circuits (root rollup, ~60GB peak RAM) still exceed consumer hardware. The gains here apply to the common case: client-side proofs, transaction circuits, and function calls that dominate the proving workload.
+> **Note:** Aztec's root rollup circuit (13M gates, dyadic size 2^24) requires an estimated 25-42 GiB of proving memory — beyond 18GB consumer hardware. The gains here apply to circuits up to ~4M dyadic size: client-side proofs, transaction circuits, parity circuits, and function calls that dominate the proving workload.
 
 ## Architecture
 
