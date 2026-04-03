@@ -5,18 +5,27 @@ bin/
 *.dylib
 
 # Build artifacts
-target/
-.aztec-packages/
 build/
 barretenberg/cpp/build/
 *.profraw
 *.profdata
+
+# Compiled circuits and witnesses (regenerable)
+target/
+
+# Node
+node_modules/
 
 # Metal compiled shaders
 *.metallib
 
 # Internal dev notes
 memory/
+
+# Stale benchmark artifacts
+proof_*/
+profile_*.txt
+bench_output*.txt
 
 # IDE / editor
 .claude/
@@ -31,4 +40,4 @@ memory/
 Thumbs.db
 
 # Intermediate report formats
-RESEARCH_REPORT.html
+reports/*.html

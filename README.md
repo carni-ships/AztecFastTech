@@ -1,247 +1,191 @@
-# AztecFastTech: GPU-Accelerated ZK Proving on Apple Silicon
+# zkMetal
 
-Hardware-accelerated UltraHonk (BN254) proving using Apple Metal compute shaders on M-series chips. This project benchmarks GPU-accelerated proving on both synthetic circuits and real Aztec protocol circuits.
+Generic Noir prover SDK — load any compiled circuit, generate UltraHonk proofs, verify, and run continuous proving pipelines.
 
-## Results
+Built on [Barretenberg](https://github.com/AztecProtocol/barretenberg) with support for WASM, native CLI, and persistent msgpack worker pools.
 
-### Synthetic Circuits (Aztec-representative operations)
+## Features
 
-Wall clock time including circuit construction, proving, and I/O:
-
-| Circuit | Gates | Baseline (CPU) | Optimized (Metal GPU) | Speedup |
-|---------|------:|---------------:|----------------------:|--------:|
-| Poseidon hash chain | 75K | 538ms | 310ms | 1.7x |
-| Merkle tree proofs | 44K | 343ms | 270ms | 1.3x |
-| EC scalar muls | 30K | 265ms | 210ms | 1.3x |
-
-The research report measures `construct_proof` time (cryptographic proving only, excluding I/O): **148ms** for the 75K-gate Poseidon circuit and **815ms** for the 428K-gate production circuit, representing **5.1x** and **3.6x** speedups respectively over stock Barretenberg.
-
-### Real Aztec Protocol Circuits (from aztec-packages v4.1.2)
-
-| Circuit | Gates | Baseline (CPU) | Optimized (Metal GPU) | Speedup |
-|---------|------:|---------------:|----------------------:|--------:|
-| parity-base | 2.27M | ~13.4s | ~12.0s | 1.12x |
-
-The `parity-base` circuit computes SHA256 + Poseidon Merkle roots over 256 L1-to-L2 messages. At 2.27M gates it is the largest UltraHonk circuit benchmarked. GPU acceleration offloads all 10 PCS-phase MSMs (including 3 at n=4,194,304), reducing CPU utilization by 52% (94.6s → 45.7s user time).
-
-**Hardware:** Apple M3 Pro (18-core GPU, 18GB unified memory)
-
-### Hardware Requirements: Aztec Official vs AztecFastTech
-
-Aztec's official prover infrastructure requires [server-class hardware](https://docs.aztec.network/the_aztec_network/guides/run_nodes/how_to_run_prover):
-
-| Resource | Aztec Prover Agent | AztecFastTech (M3 Pro laptop) | Reduction |
-|----------|-------------------|--------------------------|-----------|
-| **CPU** | 32 cores / 64 vCPU | 12 cores (6P+6E) | 5.3x fewer cores |
-| **RAM** | 128 GB | 18 GB | 7x less memory |
-| **GPU** | None (CPU-only) | 18-core Apple GPU | Novel acceleration |
-| **Cluster** | ~40 machines | 1 laptop | 40x fewer machines |
-
-Aztec's proving pipeline is entirely CPU-based. A full prover cluster requires approximately 40 machines, each with 32+ cores and 128GB RAM. By offloading multi-scalar multiplication to the Metal GPU, AztecFastTech achieves competitive proving times on a single consumer laptop with 7x less RAM — from transaction-sized circuits (30K-429K gates) up to the 2.27M-gate parity-base circuit.
-
-> **Note:** Aztec's root rollup circuit (13M gates, dyadic size 2^24) requires an estimated 25-42 GiB of proving memory — beyond 18GB consumer hardware. The gains here apply to circuits up to ~4M dyadic size: client-side proofs, transaction circuits, parity circuits, and function calls that dominate the proving workload.
-
-## Architecture
-
-The optimization targets Aztec's [Barretenberg](https://github.com/AztecProtocol/barretenberg) UltraHonk prover, specifically the Pippenger MSM algorithm used in polynomial commitment schemes (KZG via Gemini/Shplonk).
-
-17 optimization techniques including:
-1. **Metal GPU MSM pipeline** — Pippenger bucket method with 22 GPU kernels for accumulation, reduction, and combination
-2. **GLV endomorphism on GPU** — scalar decomposition moved to Metal compute, halving effective scalar width
-3. **Count-sorted reduce** — bucket IDs sorted by size to eliminate SIMD thread divergence (60% → 95%+ utilization)
-4. **GPU count-sorted mapping (CSM)** — moved CSM from CPU to GPU kernel, eliminating CPU/GPU sync bottleneck
-5. **SRS buffer + endomorphism caching** — persistent GPU buffers avoid redundant SRS copies and endomorphism recomputation
-6. **Sort-reduce batch overlap** — CPU sorts batch 2 while GPU reduces batch 1, hiding 4ms latency
-7. **Per-window bucket imbalance bailout** — detects structured polynomials causing 1000ms+ GPU stalls, falls back to CPU
-8. **DontZeroMemory** — skip redundant memory zeroing for polynomials immediately overwritten
-9. **Lazy Montgomery reduction** — GPU operates in [0,2p) with boundary normalization, fixing correctness bugs
-10. **Batch polynomial commitments** — overlaps GPU and CPU MSMs via `batch_commit`
-
-See [RESEARCH_REPORT.md](RESEARCH_REPORT.md) for the full technical writeup.
-
-## Project Structure
-
-```
-AztecFastTech/
-├── barretenberg/           # Git submodule: Metal-accelerated barretenberg fork
-├── poseidon-hash/          # Noir circuit: 1024-iteration Poseidon2 hash chain (75K gates)
-├── merkle-tree/            # Noir circuit: 512 hashes + 8 membership proofs (44K gates)
-├── ec-ops/                 # Noir circuit: 16 Grumpkin scalar multiplications (30K gates)
-├── patches/                # Additional optimization patches (applied by build-optimized.sh)
-│   ├── 01-dont-zero-partial-eval.patch
-│   ├── 02-lower-msm-threshold.patch
-│   ├── 03-adaptive-bucket-sort.patch
-│   ├── apply_adaptive_sort.py
-│   └── apply_per_window_bailout.py
-├── bench.sh                # Benchmark runner (compile, prove, verify)
-├── setup-aztec-circuits.sh # Fetch and compile real Aztec protocol circuits
-├── build-optimized.sh      # Build optimized bb binary with patches applied
-├── gen_witnesses.py        # Generate witness files for merkle-tree and ec-ops circuits
-├── results/                # Benchmark results (baseline vs optimized)
-├── RESEARCH_REPORT.md      # Full research report
-├── RESEARCH_REPORT.tex     # LaTeX version
-├── RESEARCH_REPORT.pdf     # PDF version
-└── Nargo.toml              # Noir workspace configuration
-```
-
-## Prerequisites
-
-- **macOS** with Apple Silicon (M1/M2/M3/M4)
-- [Noir](https://noir-lang.org/) (`noirup` to install nargo)
-- [Barretenberg](https://github.com/AztecProtocol/barretenberg) built with Metal support
-- CMake, Ninja, Clang (Xcode command line tools)
+- **Any Noir circuit** — point at a compiled JSON, start proving
+- **Multiple proving modes** — WASM, native bb CLI, pipelined, parallel msgpack workers
+- **Recursive IVC** — chain proofs for incremental verifiable computation
+- **Pluggable architecture** — implement `DataSource`, `WitnessBuilder`, `ProofSink` for your app
+- **Solidity verifiers** — generate on-chain verification contracts
 
 ## Quick Start
 
-### 1. Clone with submodules
-
 ```bash
-git clone --recurse-submodules https://github.com/carni-ships/AztecFastTech.git
-cd AztecFastTech
+cd prover
+npm install
+
+# Prove a single block (using Persistia adapter)
+npx tsx src/cli.ts prove --node https://your-node.com?shard=node-1 --block 100
+
+# Watch mode (continuous proving)
+npx tsx src/cli.ts watch --node https://your-node.com?shard=node-1 --mode sequential --recursive
+
+# Parallel proving with persistent bb workers
+npx tsx src/cli.ts watch --node https://your-node.com?shard=node-1 --mode parallel --workers 6
+
+# Verify a proof
+npx tsx src/cli.ts verify --proof proofs/block_100.json
+
+# Benchmark
+npx tsx src/cli.ts bench --node https://your-node.com?shard=node-1 --block 100
 ```
 
-### 2. Build Barretenberg with Metal GPU support
+## SDK Usage
 
-```bash
-cd barretenberg/barretenberg/cpp
-cmake --preset default -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-O3 -mcpu=native"
-cmake --build --preset default --target bb -j$(sysctl -n hw.ncpu)
-cd ../../..
+```typescript
+import { ProverEngine, watchSequential } from "zkmetal";
+import type { DataSource, WitnessBuilder, ProofSink } from "zkmetal/types";
+
+// 1. Point at your compiled circuit
+const engine = new ProverEngine({
+  circuitPath: "./target/my_circuit.json",
+  threads: 8,
+});
+
+// 2. Implement the three interfaces for your application
+const dataSource: DataSource<MyBlock> = {
+  fetchBlock: async (n) => { /* fetch block n from your chain/API */ },
+  fetchLatestBlockNumber: async () => { /* return latest block number */ },
+};
+
+const witnessBuilder: WitnessBuilder<MyBlock> = {
+  buildWitness: async (block, blockNumber, recursiveOpts?) => {
+    // Transform your block data into the witness map your circuit expects
+    return { field1: "value1", field2: "value2", ... };
+  },
+};
+
+const proofSink: ProofSink = {
+  submitProof: async (proof) => { /* POST proof to your verifier */ },
+};
+
+// 3. Start proving
+await watchSequential(engine, dataSource, witnessBuilder, proofSink, {
+  intervalSec: 10,
+  recursive: true,
+});
 ```
 
-### 3. Compile Noir circuits and generate witnesses
+### Using the Persistia Adapter
 
-```bash
-# Poseidon uses a simple seed (already in Prover.toml)
-# Generate witnesses for merkle-tree and ec-ops:
-python3 gen_witnesses.py
+```typescript
+import { ProverEngine, watchSequential } from "zkmetal";
+import { createPersistiaAdapter } from "zkmetal/adapters/persistia";
 
-# Compile circuits and execute witnesses
-nargo compile
-nargo execute
+const engine = new ProverEngine({
+  circuitPath: "./target/persistia_state_proof.json",
+});
+
+const { dataSource, witnessBuilder, proofSink } = createPersistiaAdapter(
+  "https://your-persistia-node.com?shard=node-1"
+);
+
+await watchSequential(engine, dataSource, witnessBuilder, proofSink, {
+  recursive: true,
+  useNative: true,
+});
 ```
 
-### 4. Run benchmarks
+## Performance
 
-```bash
-./bench.sh
+| Metric | Value |
+|--------|-------|
+| Proof time | ~6s per block (Apple Silicon, native ARM64) |
+| Circuit size | ~42K gates (non-recursive) / ~769K gates (recursive IVC) |
+| Proof size | 16 KB |
+| Sustained throughput | ~10 proofs/min (sequential) |
+
+See [RESEARCH.md](RESEARCH.md) for detailed performance analysis and scaling paths.
+
+## Architecture
+
+### Proving Engine (`ProverEngine`)
+
+Core class that wraps Noir + Barretenberg. Handles circuit loading, witness execution, proof generation, and verification. Supports both WASM and native bb CLI backends.
+
+### Watch Modes
+
+| Mode | Description | Best For |
+|------|-------------|----------|
+| `sequential` | One block at a time, supports IVC chaining | Production with recursive proofs |
+| `pipelined` | Overlaps witness solving with native proving | Single-prover catch-up |
+| `parallel` | Multiple persistent bb workers via msgpack | High-throughput catch-up |
+
+### Adapter Pattern
+
+```
+┌─────────────┐     ┌──────────────┐     ┌───────────────┐
+│ DataSource   │────>│ ProverEngine │────>│ ProofSink     │
+│ (fetch data) │     │ (prove)      │     │ (submit)      │
+└─────────────┘     └──────────────┘     └───────────────┘
+       ↑                    ↑                     ↑
+       │            ┌──────────────┐              │
+       │            │WitnessBuilder│              │
+       │            │(data→witness)│              │
+       │            └──────────────┘              │
+       │                                          │
+   Your chain API                          Your verifier
 ```
 
-### 5. Build with additional optimizations and compare
+Implement `DataSource`, `WitnessBuilder`, and `ProofSink` from `zkmetal/types` to connect any data source to the proving pipeline.
 
-```bash
-# Apply extra patches (DontZeroMemory, adaptive sort) and rebuild
-./build-optimized.sh
+### Project Structure
 
-# Run benchmarks with optimized binary
-BB_LOCAL=./bin/bb-opt ./bench.sh
+```
+src/main.nr                    # Noir circuit (reference: Persistia state proof)
+Nargo.toml                     # Noir project config
+
+prover/
+  src/
+    index.ts                   # SDK exports
+    types.ts                   # Core interfaces (DataSource, WitnessBuilder, ProofSink)
+    engine.ts                  # ProverEngine (circuit loading, proving, verification)
+    watcher.ts                 # Watch loops (sequential, pipelined, parallel)
+    persistent-bb.ts           # PersistentBb msgpack worker
+    witness.ts                 # Persistia-specific witness generation
+    cli.ts                     # CLI entrypoint
+    adapters/
+      persistia/index.ts       # Persistia adapter (reference implementation)
+  test/                        # Integration tests and benchmarks
+
+target/
+  persistia_state_proof.json   # Compiled circuit
+  PersistiaVerifier.sol        # Generated Solidity verifier
+
+test/
+  PersistiaVerifier.t.sol      # Foundry tests for on-chain verification
 ```
 
-## Benchmark Circuits
+## Writing a Custom Adapter
 
-### Synthetic (Aztec-representative)
+To prove a different Noir circuit with your own data source:
 
-| Circuit | Description | Gates |
-|---------|-------------|------:|
-| **poseidon-hash** | 1024 sequential Poseidon2 hashes | 75K |
-| **merkle-tree** | 512 hashes + 8 Merkle membership proofs | 44K |
-| **ec-ops** | 16 Grumpkin scalar multiplications | 30K |
+1. **Compile your circuit**: `nargo compile` in your circuit directory
+2. **Implement `DataSource<B>`**: fetch your blocks/units of work
+3. **Implement `WitnessBuilder<B>`**: transform blocks into the witness map your circuit expects
+4. **Implement `ProofSink`** (optional): submit proofs to your verifier
+5. **Wire it up**:
 
-These exercise the core operations in Aztec's proving workload: Poseidon2 hashing (note commitments, nullifiers), Merkle proofs (state inclusion), and EC operations (Schnorr signatures, Pedersen commitments).
-
-### Real Aztec Protocol Circuits
-
-| Circuit | Description | Gates | Source |
-|---------|-------------|------:|--------|
-| **parity-base** | SHA256 + Poseidon Merkle root over 256 L1-to-L2 messages | 2.27M | aztec-packages v4.1.2 |
-
-Pre-compiled artifacts are included in `target/`. To regenerate from source, see [aztec-packages](https://github.com/AztecProtocol/aztec-packages) at tag `v4.1.2`.
-
-## Building a GPU-Accelerated Aztec Prover
-
-You can use this repo to build a Metal-accelerated `bb` binary that serves as a drop-in replacement for Barretenberg's stock prover. This works with any Noir circuit targeting the UltraHonk backend.
-
-### Build the prover
-
-```bash
-git clone --recurse-submodules https://github.com/carni-ships/AztecFastTech.git
-cd AztecFastTech
-
-# Build barretenberg with Metal GPU support
-cd barretenberg/barretenberg/cpp
-cmake --preset default -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-O3 -mcpu=native"
-cmake --build --preset default --target bb -j$(sysctl -n hw.ncpu)
-cd ../../..
+```typescript
+const engine = new ProverEngine({ circuitPath: "./target/your_circuit.json" });
+await watchSequential(engine, yourDataSource, yourWitnessBuilder, yourProofSink);
 ```
 
-The resulting binary is at `barretenberg/barretenberg/cpp/build/bin/bb`.
+## Hash Function: Poseidon2
 
-### Use with any Noir circuit
+The reference circuit uses Poseidon2 — a field-native hash function ~100x cheaper in ZK circuits than SHA-256.
 
-```bash
-# Compile your circuit
-nargo compile
+## Signatures: Schnorr on Grumpkin
 
-# Execute witness
-nargo execute
+The reference circuit verifies Schnorr signatures on the Grumpkin curve (BN254's embedded curve), natively supported in Noir at ~3K gates per verification.
 
-# Prove (GPU acceleration is automatic — no flags needed)
-bb prove -b target/<circuit>.json -w target/<circuit>.gz -o proof
+## Proving System: UltraHonk
 
-# Verify
-bb verify -k vk -p proof/proof -i proof/public_inputs
-```
-
-The GPU pipeline activates automatically for MSMs with 32K+ points (typical for circuits above ~60K gates). Smaller circuits stay on CPU where it's faster. If the GPU encounters bucket imbalance (common with structured witness polynomials), it falls back to CPU transparently.
-
-### Use with Aztec protocol circuits
-
-```bash
-# Fetch and compile real Aztec circuits (requires nargo 1.0.0-beta.18+)
-./setup-aztec-circuits.sh
-
-# Prove parity-base (2.27M gates)
-bb prove -b target/parity_base.json -w target/parity_base.gz -o proof
-```
-
-### Apply additional optimizations
-
-```bash
-# Build with DontZeroMemory and other patches
-./build-optimized.sh
-
-# Use the optimized binary
-./bin/bb-opt prove -b target/<circuit>.json -w target/<circuit>.gz -o proof
-```
-
-### Requirements
-
-- macOS on Apple Silicon (M1/M2/M3/M4)
-- Xcode command line tools (for Metal compiler and C++ toolchain)
-- CMake and Ninja (`brew install cmake ninja`)
-- [Noir](https://noir-lang.org/) nargo (`noirup` to install) — for circuit compilation only
-
-### Environment variables
-
-| Variable | Effect |
-|----------|--------|
-| `BB_NO_GPU=1` | Disable GPU, use CPU-only proving |
-| `BB_GPU_PROFILE=1` | Print per-MSM GPU timing |
-| `BB_GPU_PROFILE=2` | Print per-phase GPU timing (glv, sort, csm, reduce, sum, combine) |
-
-## Research Report
-
-The full technical report covers:
-- System architecture and UltraHonk prover pipeline
-- 17 successful optimization techniques with implementation details
-- 16 rejected approaches with measured evidence
-- Performance ceiling analysis (GPU ALU-bound at 61%, CPU ALU-bound at 23%)
-- Lessons learned about Apple Metal compute for cryptographic workloads
-
-Available in three formats:
-- [Markdown](RESEARCH_REPORT.md)
-- [LaTeX](RESEARCH_REPORT.tex)
-- [PDF](RESEARCH_REPORT.pdf)
+Proofs use Barretenberg's UltraHonk in non-ZK mode. Suitable for applications where the proof attests to correct computation rather than data privacy.
 
 ## License
 

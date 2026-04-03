@@ -1,3 +1,0 @@
-[submodule "barretenberg"]
-	path = barretenberg
-	url = https://github.com/carni-ships/zkmetal.git
