@@ -57,9 +57,13 @@ async function loadAdapter(nodeBase: string): Promise<{
       const { createPersistiaAdapter } = await import("./adapters/persistia/index.js");
       return createPersistiaAdapter(nodeBase);
     }
+    case "aztec": {
+      const { createAztecAdapter } = await import("./adapters/aztec/index.js");
+      return createAztecAdapter(nodeBase);
+    }
     default:
       throw new Error(
-        `Unknown adapter: ${adapterName}. Available: persistia\n` +
+        `Unknown adapter: ${adapterName}. Available: persistia, aztec\n` +
         `To add a custom adapter, implement DataSource, WitnessBuilder, and ProofSink from zkmetal/types.`,
       );
   }
@@ -306,6 +310,41 @@ switch (command) {
   case "bb-version":
     cmdBbVersion();
     break;
+  case "aztec-info": {
+    const nodeBase = getArg("node", "https://rpc.testnet.aztec-labs.com");
+    const { createAztecAdapter } = await import("./adapters/aztec/index.js");
+    const { dataSource } = createAztecAdapter(nodeBase);
+    const ds = dataSource as import("./adapters/aztec/index.js").AztecDataSource;
+
+    console.log(`Aztec node: ${nodeBase}`);
+    try {
+      const info = await ds.getNodeInfo();
+      console.log(`Version: ${info.version}`);
+      console.log(`Chain ID: ${info.chainId} (${info.chainId === 11155111 ? "Sepolia" : "unknown"})`);
+      console.log(`Protocol: ${info.protocolVersion}`);
+    } catch (e: any) {
+      console.log(`Node info: ${e.message}`);
+    }
+    const latest = await ds.fetchLatestBlockNumber();
+    console.log(`Latest block: ${latest}`);
+    try {
+      const proven = await ds.getProvenBlockNumber();
+      console.log(`Proven block: ${proven}`);
+      console.log(`Unproven gap: ${latest - proven} blocks`);
+    } catch { /* ignore */ }
+    const ready = await ds.isReady();
+    console.log(`Ready: ${ready}`);
+
+    if (latest > 0) {
+      const block = await ds.fetchBlock(latest);
+      console.log(`\nLatest block ${latest}:`);
+      console.log(`  Slot: ${block.header.globalVariables.slotNumber}`);
+      console.log(`  Txs: ${block.txEffects.length}`);
+      console.log(`  Fees: ${block.header.totalFees}`);
+      console.log(`  Mana: ${block.header.totalManaUsed}`);
+    }
+    break;
+  }
   case "gpu-info": {
     const engine = getEngine();
     const gpuInfo = engine.metalGpuInfo();
@@ -339,11 +378,12 @@ Usage:
   tsx cli.ts verify   --proof <path> [--native]
   tsx cli.ts watch    --node <url> [--mode sequential|pipelined|parallel] [--recursive] [--native]
   tsx cli.ts bench    --block <n> [--node <url>]
+  tsx cli.ts aztec-info [--node <url>]
   tsx cli.ts bb-version
 
 Options:
   --circuit <path>    Path to compiled Noir circuit JSON (default: target/persistia_state_proof.json)
-  --adapter <name>    Data adapter: persistia (default: persistia)
+  --adapter <name>    Data adapter: persistia, aztec (default: persistia)
   --node <url>        Node URL for data source
   --native            Use native bb CLI instead of WASM (faster)
   --recursive         Enable recursive IVC proof chaining
@@ -354,5 +394,6 @@ Options:
 
 Adapters:
   persistia           Fetches blocks from a Persistia node (reference implementation)
+  aztec               Fetches L2 blocks from an Aztec node via JSON-RPC
   (custom)            Implement DataSource, WitnessBuilder, ProofSink from zkmetal/types`);
   }

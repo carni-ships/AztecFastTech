@@ -1,43 +1,36 @@
-# Binaries
-bin/
-*.o
+
+.claude/
+.DS_Store
+.idea/
+.secrets/
+.vscode/
 *.a
 *.dylib
-
-# Build artifacts
-build/
-barretenberg/cpp/build/
-*.profraw
-*.profdata
-
-# Compiled circuits and witnesses (regenerable)
-target/
-
-# Node
-node_modules/
-
-# Metal compiled shaders
 *.metallib
-
-# Internal dev notes
-memory/
-
-# Stale benchmark artifacts
-proof_*/
-profile_*.txt
-bench_output*.txt
-
-# IDE / editor
-.claude/
-.vscode/
-.idea/
-*.swp
+*.o
+*.profdata
+*.profraw
 *.swo
+*.swp
 *~
-
-# OS
-.DS_Store
-Thumbs.db
-
+# Binaries
+# Build artifacts
+# Compiled circuits and witnesses (regenerable)
+# IDE / editor
 # Intermediate report formats
+# Internal dev notes
+# Metal compiled shaders
+# Node
+# OS
+# Stale benchmark artifacts
+barretenberg/cpp/build/
+bench_output*.txt
+bin/
+build/
+memory/
+node_modules/
+profile_*.txt
+proof_*/
 reports/*.html
+target/
+Thumbs.db
