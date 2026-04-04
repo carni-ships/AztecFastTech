@@ -17,6 +17,10 @@ echo ""
 # metal_msm.mm has permanent changes in source; per-window patch applied additively
 PATCH_FILES=(
     "flavor/partially_evaluated_multivariates.hpp"
+    "commitment_schemes/commitment_key.hpp"
+    "bbapi/bbapi_ultra_honk.cpp"
+    "polynomials/backing_memory.hpp"
+    "ecc/scalar_multiplication/scalar_multiplication.cpp"
 )
 
 # Backup originals
@@ -57,6 +61,31 @@ echo "  [2] MSM threshold: kept at 2^17 (GPU overhead dominates below 131K)"
 # 3. Per-window bucket imbalance bailout: now permanently in source (metal_msm.mm).
 #    skip_imbalance_check propagated through batch_multi_scalar_mul for wire commits.
 echo "  [3] Per-window bucket bailout (permanent in source)"
+
+# 4. CommitmentKey cache: avoid SRS re-fetch + Metal prewarm across same-size proofs
+PATCH_SRC="$SCRIPT_DIR/../patches/barretenberg/cpp/src/barretenberg"
+if [ -f "$PATCH_SRC/commitment_schemes/commitment_key.hpp" ]; then
+    cp "$PATCH_SRC/commitment_schemes/commitment_key.hpp" "$BB_SRC/commitment_schemes/commitment_key.hpp"
+    echo "  [4] CommitmentKey::get_or_create() cache"
+fi
+
+# 5. bbapi CK cache integration: use cached CK in prove path
+if [ -f "$PATCH_SRC/bbapi/bbapi_ultra_honk.cpp" ]; then
+    cp "$PATCH_SRC/bbapi/bbapi_ultra_honk.cpp" "$BB_SRC/bbapi/bbapi_ultra_honk.cpp"
+    echo "  [5] bbapi: cached CommitmentKey in prove path"
+fi
+
+# 6. Huge page support for large polynomial allocations (reduces TLB misses)
+if [ -f "$PATCH_SRC/polynomials/backing_memory.hpp" ]; then
+    cp "$PATCH_SRC/polynomials/backing_memory.hpp" "$BB_SRC/polynomials/backing_memory.hpp"
+    echo "  [6] Huge pages + MADV_FREE for polynomial allocations"
+fi
+
+# 7. Cache-aware MSM bucket width selection
+if [ -f "$PATCH_SRC/ecc/scalar_multiplication/scalar_multiplication.cpp" ]; then
+    cp "$PATCH_SRC/ecc/scalar_multiplication/scalar_multiplication.cpp" "$BB_SRC/ecc/scalar_multiplication/scalar_multiplication.cpp"
+    echo "  [7] Cache-aware MSM bucket width + thread-local LUT"
+fi
 
 echo ""
 
