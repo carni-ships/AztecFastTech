@@ -1,4 +1,4 @@
-# zkMetal
+# AztecFastTech
 
 Generic Noir prover SDK — load any compiled circuit, generate UltraHonk proofs, verify, and run continuous proving pipelines.
 
@@ -37,8 +37,8 @@ npx tsx src/cli.ts bench --node https://your-node.com?shard=node-1 --block 100
 ## SDK Usage
 
 ```typescript
-import { ProverEngine, watchSequential } from "zkmetal";
-import type { DataSource, WitnessBuilder, ProofSink } from "zkmetal/types";
+import { ProverEngine, watchSequential } from "aztecfasttech";
+import type { DataSource, WitnessBuilder, ProofSink } from "aztecfasttech/types";
 
 // 1. Point at your compiled circuit
 const engine = new ProverEngine({
@@ -73,8 +73,8 @@ await watchSequential(engine, dataSource, witnessBuilder, proofSink, {
 ### Using the Persistia Adapter
 
 ```typescript
-import { ProverEngine, watchSequential } from "zkmetal";
-import { createPersistiaAdapter } from "zkmetal/adapters/persistia";
+import { ProverEngine, watchSequential } from "aztecfasttech";
+import { createPersistiaAdapter } from "aztecfasttech/adapters/persistia";
 
 const engine = new ProverEngine({
   circuitPath: "./target/persistia_state_proof.json",
@@ -131,7 +131,7 @@ Core class that wraps Noir + Barretenberg. Handles circuit loading, witness exec
    Your chain API                          Your verifier
 ```
 
-Implement `DataSource`, `WitnessBuilder`, and `ProofSink` from `zkmetal/types` to connect any data source to the proving pipeline.
+Implement `DataSource`, `WitnessBuilder`, and `ProofSink` from `aztecfasttech/types` to connect any data source to the proving pipeline.
 
 ### Project Structure
 
