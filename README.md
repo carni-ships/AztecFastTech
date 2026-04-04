@@ -187,6 +187,62 @@ The reference circuit verifies Schnorr signatures on the Grumpkin curve (BN254's
 
 Proofs use Barretenberg's UltraHonk in non-ZK mode. Suitable for applications where the proof attests to correct computation rather than data privacy.
 
+## Running the Aztec Testnet Prover
+
+Run a prover node against Aztec testnet using the optimized bb-avm binary.
+
+### Prerequisites
+
+1. **Sepolia ETH** in the prover wallet (for L1 proof submissions)
+2. **Aztec CLI** installed at `~/.aztec/current`
+3. **bb-avm binary** built from `aztec-packages-v4.1.2/barretenberg/cpp`:
+   ```bash
+   cd aztec-packages-v4.1.2/barretenberg/cpp
+   cmake --preset default -DCMAKE_BUILD_TYPE=Release
+   cmake --build --preset default --target bb-avm -j$(sysctl -n hw.ncpu)
+   ```
+4. **acvm binary** built from `aztec-packages-v4.1.2/noir/noir-repo`:
+   ```bash
+   cd aztec-packages-v4.1.2/noir/noir-repo
+   RUSTFLAGS="-C target-cpu=native" cargo build --release -p acvm_cli
+   ```
+5. **Prover wallet** configured in `.secrets/prover-wallet.env`:
+   ```bash
+   PROVER_PRIVATE_KEY=0x...
+   PROVER_ADDRESS=0x...
+   ```
+
+### Start the Prover
+
+```bash
+# Dry run (print config without starting)
+./scripts/start-prover.sh --dry-run
+
+# Start prover node + broker + 2 agents
+./scripts/start-prover.sh
+```
+
+The script launches a broker on port 8079 and a prover node with 2 parallel agents (6 threads each) on port 8180. The dual-agent configuration enables critical-path parallelism: merge tree jobs can run while leaf proofs are still in flight.
+
+### Architecture
+
+```
+Broker (port 8079) ←── Prover Node (port 8180)
+                           ├── Agent 1 (6 threads)
+                           └── Agent 2 (6 threads)
+```
+
+Each epoch requires ~98 proving jobs across circuit types (PUBLIC_TX_BASE_ROLLUP, BLOCK_ROOT_EMPTY_TX, PARITY_BASE, CHECKPOINT_ROOT, CHECKPOINT_MERGE, ROOT_ROLLUP). With 2 agents, epochs complete in ~19 minutes.
+
+### First Successful Epoch
+
+Epoch 1093 (checkpoints 28774–28804) was the first fully completed epoch, with all 82 proofs generated and accepted on Sepolia L1:
+
+- **Transaction**: [`0xa975cce09a223a845c520a5ac4678bbad6e6a126180a55cce4fd999fbe319305`](https://sepolia.etherscan.io/tx/0xa975cce09a223a845c520a5ac4678bbad6e6a126180a55cce4fd999fbe319305)
+- **Sepolia block**: 10584707
+- **82 proofs, 0 errors** across all circuit types
+- **Prover**: `0xe8fd052579c6552328f0aa316D1B341EaB5Fd42b`
+
 ## License
 
 MIT

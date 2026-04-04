@@ -101,6 +101,7 @@ $AZTEC start \
   --prover-broker \
   --network testnet \
   --port "$BROKER_PORT" \
+  --rpcMaxBodySize 50mb \
   2>&1 | sed 's/^/[broker] /' &
 BROKER_PID=$!
 echo "  Broker PID: $BROKER_PID"
@@ -119,11 +120,17 @@ echo ""
 echo "Phase 2: Starting prover node + agent..."
 export PROVER_BROKER_HOST="$BROKER_URL"
 
+# 2 agents with 6 threads each: enables critical-path parallelism
+# (merge tree jobs can run while leaf proofs are still in flight)
+export HARDWARE_CONCURRENCY=6
+
 exec $AZTEC start \
   --prover-node \
   --prover-agent \
   --network testnet \
   --p2p-enabled false \
   --port 8180 \
+  --rpcMaxBodySize 50mb \
   --proverNode.nodeUrl "$AZTEC_NODE_URL" \
-  --proverNode.proverId "$PROVER_ADDRESS"
+  --proverNode.proverId "$PROVER_ADDRESS" \
+  --proverAgent.proverAgentCount 2
