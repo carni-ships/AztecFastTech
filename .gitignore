@@ -27,6 +27,8 @@ barretenberg/cpp/build/
 bench_output*.txt
 bin/
 build/
+.prover-data/
+.prover-data-mainnet/
 memory/
 node_modules/
 profile_*.txt
