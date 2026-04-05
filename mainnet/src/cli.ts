@@ -15,6 +15,7 @@ import { getUnclaimedEpochs, selectEpochBatch } from './epochs.js';
 import { getAztecEthPrice, quoteProfitability, formatQuote } from './price.js';
 import { submitClaimBundle } from './bundle.js';
 import { runClaimDaemon, defaultConfig } from './claim-daemon.js';
+import { getAllProverProfiles, getCurrentEpochInfo, printCompetitiveAnalysis } from './competitive.js';
 import { parseEther, formatEther } from 'viem';
 
 const USAGE = `
@@ -27,6 +28,7 @@ Commands:
   claim [--dry-run]       Run one claim cycle (submit bundle if profitable)
   daemon [--dry-run]      Run continuous claim daemon
   monitor                 Run continuous monitoring loop (balance, timelock, health)
+  competitors             Analyze competing provers' submission timing and estimate next submissions
 
 Environment variables:
   PROVER_PRIVATE_KEY      Prover wallet private key (0x-prefixed)
@@ -140,6 +142,18 @@ async function main() {
     case 'monitor': {
       const intervalMs = parseInt(process.env.MONITOR_INTERVAL_MS ?? String(DEFAULTS.monitorIntervalMs));
       await runMonitor(getAddress(), intervalMs);
+      break;
+    }
+
+    case 'competitors': {
+      const lookback = BigInt(process.env.LOOKBACK_BLOCKS ?? '7200');
+      console.log(`Fetching proof submissions (last ${lookback} L1 blocks)...`);
+      const profiles = await getAllProverProfiles(lookback);
+      const epochInfo = getCurrentEpochInfo();
+      console.log(`\n  Current epoch (est):    ${epochInfo.currentEpoch}`);
+      console.log(`  Epoch ends in:          ${(epochInfo.secondsUntilEnd / 60).toFixed(1)} min`);
+      console.log(`  Proof deadline in:      ${(epochInfo.secondsUntilDeadline / 60).toFixed(1)} min`);
+      printCompetitiveAnalysis(profiles);
       break;
     }
 
