@@ -155,14 +155,34 @@ DATA_DIR="$BASE_DIR/.prover-data-mainnet"
 
 mkdir -p "$BB_WORK_DIR" "$ACVM_WORK_DIR" "$DATA_DIR"
 
-# --- Archiver & broker tuning ---
-# Mainnet: slightly more conservative polling to respect paid RPC rate limits
+# --- Archiver & broker tuning (prover-optimized) ---
+# Mainnet: conservative polling to respect paid RPC rate limits
 export ARCHIVER_POLLING_INTERVAL_MS="${ARCHIVER_POLLING_INTERVAL_MS:-3000}"
 export ARCHIVER_BATCH_SIZE=500
 export ARCHIVER_STORE_MAP_SIZE_KB=2097152     # 2 GB archiver DB cap (mainnet has more data)
 export WS_DB_MAP_SIZE_KB=1048576              # 1 GB world state cap
-export WS_NUM_HISTORIC_CHECKPOINTS=8
+
+# Prover only needs current state — 1 checkpoint saves ~300-400MB vs default 8.
+# The prover never replays historical state; it only proves the current epoch.
+export WS_NUM_HISTORIC_CHECKPOINTS=1
+
+# Only keep last epoch's proving jobs. Cleans up 600-750MB of stale job data.
 export PROVER_BROKER_MAX_EPOCHS_TO_KEEP_RESULTS_FOR=1
+
+# Skip archiver initial sync if already partially synced and gap is small.
+# On first run this is ignored (no archiver DB yet). On restarts after short
+# downtime, the archiver catches up incrementally during proving — no need
+# to block startup waiting for full sync.
+ARCHIVER_DB="$DATA_DIR/archiver"
+if [ -d "$ARCHIVER_DB" ]; then
+  export SKIP_ARCHIVER_INITIAL_SYNC="${SKIP_ARCHIVER_INITIAL_SYNC:-1}"
+  if [ "${SKIP_ARCHIVER_INITIAL_SYNC}" = "1" ]; then
+    echo "  Archiver: incremental sync (skipping initial block)"
+  fi
+fi
+
+# Disable debug log collection in prover-only mode (saves memory on proof runs)
+export PROVER_REAL_PROOFS=true
 
 # =============================================================================
 # AUTO-DETECT AGENT COUNT (same logic as testnet)
@@ -249,7 +269,8 @@ echo ""
 
 # Check mainnet ETH balance
 CAST=~/.aztec/current/bin/cast
-BALANCE=$($CAST balance "$PROVER_ADDRESS" --rpc-url "$(echo "$ETHEREUM_MAINNET_RPC" | cut -d, -f1)" -e 2>/dev/null || echo "?")
+L1_RPC_FIRST="$(echo "$ETHEREUM_MAINNET_RPC" | cut -d, -f1)"
+BALANCE=$($CAST balance "$PROVER_ADDRESS" --rpc-url "$L1_RPC_FIRST" -e 2>/dev/null || echo "?")
 echo "  ETH balance:  $BALANCE"
 
 # Warn if balance is low (proof submission costs ~0.005-0.02 ETH per epoch)
@@ -259,6 +280,21 @@ if [ "$BALANCE" != "?" ]; then
     echo "  WARNING: Low ETH balance. Each proof submission costs ~0.005-0.02 ETH."
     echo "  Consider topping up before proving."
   fi
+fi
+
+# --- Reward timelock check ---
+# The mainnet rollup contract has a 90-day timelock before rewards can be claimed.
+# Once the owner calls setRewardsClaimable(true) after the timelock, the atomic
+# claim+swap pipeline becomes viable. Until then, proving is gas-only cost.
+ROLLUP_CONTRACT="0x603bb2c05d474794ea97805e8de69bccfb3bca12"
+REWARDS_CLAIMABLE=$($CAST call "$ROLLUP_CONTRACT" "isRewardsClaimable()(bool)" --rpc-url "$L1_RPC_FIRST" 2>/dev/null || echo "error")
+if [ "$REWARDS_CLAIMABLE" = "true" ]; then
+  echo "  Rewards:      CLAIMABLE (atomic claim+swap pipeline ready)"
+elif [ "$REWARDS_CLAIMABLE" = "false" ]; then
+  echo "  Rewards:      LOCKED (90-day timelock active — rewards accumulate but cannot be claimed yet)"
+  echo "                Proving costs gas with no immediate revenue until timelock expires."
+else
+  echo "  Rewards:      Could not query rollup contract (RPC error)"
 fi
 echo ""
 
