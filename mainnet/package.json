@@ -1,0 +1,24 @@
+{
+  "name": "aztec-mainnet-pipeline",
+  "version": "0.1.0",
+  "description": "Mainnet prover reward pipeline: claim AZTEC rewards, swap to ETH, MEV-protected",
+  "type": "module",
+  "scripts": {
+    "status": "tsx src/cli.ts status",
+    "price": "tsx src/cli.ts price",
+    "quote": "tsx src/cli.ts quote",
+    "claim": "tsx src/cli.ts claim",
+    "claim:dry": "tsx src/cli.ts claim --dry-run",
+    "daemon": "tsx src/cli.ts daemon",
+    "daemon:dry": "tsx src/cli.ts daemon --dry-run",
+    "monitor": "tsx src/cli.ts monitor"
+  },
+  "dependencies": {
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
