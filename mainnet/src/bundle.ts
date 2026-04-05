@@ -39,9 +39,10 @@ export async function submitClaimBundle(
   const dryRun = overrides?.dryRun ?? false;
 
   // 1. Estimate total AZTEC rewards for this batch
-  //    Use 150 AZTEC per epoch as estimate (30% of 500 AZTEC checkpoint reward)
-  //    Actual amount depends on activity score and competition
-  const estimatedAztecPerEpoch = parseEther('150');
+  //    32 checkpoints × 500 AZTEC × 30% prover share = 4,800 AZTEC per epoch
+  //    (verified from RollupConfiguration.sol:73-74)
+  //    Actual share depends on activity score and number of competing provers
+  const estimatedAztecPerEpoch = parseEther('4800');
   const totalAztecEstimate = estimatedAztecPerEpoch * BigInt(epochs.length);
 
   // 2. Get profitability quote

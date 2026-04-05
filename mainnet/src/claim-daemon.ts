@@ -84,7 +84,7 @@ export async function runClaimDaemon(config: ClaimDaemonConfig): Promise<never> 
       }
 
       // 4. Quick profitability pre-check before submitting
-      const estimatedAztec = parseEther('150') * BigInt(batch.length);
+      const estimatedAztec = parseEther('4800') * BigInt(batch.length);
       const quote = await quoteProfitability(estimatedAztec, {
         minProfitEth: config.minProfitEth,
         builderTipEth: config.builderTipEth,

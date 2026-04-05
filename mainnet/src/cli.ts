@@ -85,8 +85,8 @@ async function main() {
     case 'price': {
       const price = await getAztecEthPrice();
       console.log(`AZTEC/ETH: ${price.toFixed(10)}`);
-      console.log(`150 AZTEC = ${(150 * price).toFixed(6)} ETH`);
-      console.log(`1500 AZTEC (10 epochs) = ${(1500 * price).toFixed(6)} ETH`);
+      console.log(`4,800 AZTEC (1 epoch prover pool) = ${(4800 * price).toFixed(6)} ETH`);
+      console.log(`48,000 AZTEC (10 epochs) = ${(48000 * price).toFixed(6)} ETH`);
       break;
     }
 
@@ -103,7 +103,7 @@ async function main() {
       }
 
       const batch = selectEpochBatch(unclaimed, 1, DEFAULTS.maxEpochBatch) ?? unclaimed;
-      const estimatedAztec = parseEther('150') * BigInt(batch.length);
+      const estimatedAztec = parseEther('4800') * BigInt(batch.length);
       const quote = await quoteProfitability(estimatedAztec, getOverrides());
 
       console.log(`\nQuote for ${batch.length} epochs (~${formatEther(estimatedAztec)} AZTEC):`);
