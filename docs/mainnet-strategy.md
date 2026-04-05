@@ -5,7 +5,7 @@
 Aztec mainnet proving is fully permissionless — no bonds, registration, or stake required.
 Submit valid proofs to the rollup contract and earn AZTEC token rewards.
 
-**Rollup contract:** `0x603bb2c05d474794ea97805e8de69bccfb3bca12` (Ethereum L1)
+**Rollup contract:** `0xae2001f7e21d5ecabf6234e9fdd1e76f50f74962` (Ethereum L1, deployed 2026-03-04)
 **AZTEC token:** `0xA27EC0006e59f245217Ff08CD52A7E8b169E62D2` (ERC20, 10.35B supply, 2.95B circulating)
 **Registry:** `0x35b22e09Ee0390539439E24f06Da43D83f90e298`
 
@@ -41,16 +41,17 @@ Prover pool in USD:              4,800 × $0.01778        = $85.34
 Prover pool in ETH:              $85.34 / $2,054         = 0.04155 ETH
 ```
 
-**Proof submission cost:**
+**Proof submission cost (observed from successful tx on-chain):**
 ```
-Gas used (observed on-chain):    ~800,000 gas
-Gas cost:                        800,000 × 0.093 gwei    = 0.0000744 ETH = $0.15
+Gas used (successful proof):     3,945,589 gas
+Gas cost:                        3,945,589 × 0.125 gwei  = 0.000493 ETH  = $1.01
 ```
 
 **Competition (observed 2026-04-05):**
-One address (`0xa5c7...2705`) dominates proof submissions on mainnet. With minimal
+One address (`0xa5c7...2705`) dominates proof submissions on mainnet, submitting via
+**Flashbots BuilderNet** (private mempool — not front-runnable). With minimal
 competition, a single prover captures the full 4,800 AZTEC ($85.34) per epoch at
-$0.15 gas cost — a **568x ROI per proof submission**.
+~$1 gas cost — an **85x ROI per proof submission**.
 
 **Activity score dynamics:**
 - Score builds at +125,000 per proof, caps at 15,000,000 (120 proofs to max)
@@ -76,22 +77,29 @@ score. But only the longest-proof group gets anything.
 - Total time to prove + submit: ~76.8 minutes from epoch start
 - Proving speed is the competitive advantage — faster prover submits first
 
+### The Dominant Prover
+
+The current dominant prover (`0xa5c7...2705`) submits via **Flashbots BuilderNet**
+(private mempool). Their proofs are not visible in the public mempool before inclusion,
+making front-running infeasible. To compete, we must out-prove them (faster proving)
+rather than out-MEV them.
+
 ### Decision: Prove Every Epoch
 
-At current gas prices (0.093 gwei), proof submission costs $0.15.
+At current gas prices (~0.1 gwei), proof submission costs ~$1.01 (3.9M gas).
 Even with 10 competing provers sharing 4,800 AZTEC, your share (480 AZTEC = $8.53)
-vastly exceeds the $0.15 submission cost. **Prove every epoch.**
+vastly exceeds the ~$1 submission cost. **Prove every epoch.**
 
 ### Gas Budget (Phase 1, pre-timelock)
 
 ```
 Epochs per day:                  24h × 60min / 38.4min   = 37.5 epochs/day
-Gas per proof:                   $0.15
-Daily gas cost:                  37.5 × $0.15            = $5.63/day
-90-day Phase 1 gas budget:       90 × $5.63              = $506 = ~0.25 ETH
+Gas per proof:                   ~$1.01
+Daily gas cost:                  37.5 × $1.01            = $37.88/day
+90-day Phase 1 gas budget:       90 × $37.88             = $3,409 = ~1.66 ETH
 ```
 
-Fund the prover EOA with **0.3 ETH** for comfortable Phase 1 operations.
+Fund the prover EOA with **2 ETH** for comfortable Phase 1 operations.
 
 ## Two-Phase Timeline
 
@@ -169,28 +177,28 @@ Key features:
 Contract reverts with `NotProfitable(ethReceived, totalCost, minProfit)` if the swap
 output doesn't cover costs. Flashbots doesn't charge for reverted bundles.
 
-### Economics (verified)
+### Economics (verified from on-chain data, 2026-04-05)
 
 ```
-Claim + swap gas:                ~800,000 gas × 0.093 gwei  = 0.0000744 ETH = $0.15
+Claim + swap gas:                ~4,500,000 gas × 0.125 gwei = 0.000563 ETH = $1.16
 Builder tip:                     0.0005 ETH                                  = $1.03
-Total claim cost:                                                            ≈ $1.18
+Total claim cost:                                                            ≈ $2.19
 
 Revenue per epoch (sole prover):  4,800 AZTEC × $0.01778                    = $85.34
 Revenue per epoch (10 provers):   480 AZTEC × $0.01778                      = $8.53
 Revenue per epoch (50 provers):   96 AZTEC × $0.01778                       = $1.71
 
-Break-even prover count:          ~72 equal provers (4800/72 × $0.01778 = $1.18)
+Break-even prover count:          ~37 equal provers (4800/37 × $0.01778 = $2.31)
 ```
 
-The operation remains profitable up to ~72 equal competing provers at current prices.
+The operation remains profitable up to ~37 equal competing provers at current prices.
 
 ### Claim Frequency
 
 At current economics, claim every **3-5 epochs** (minimum batch: 3).
 - 3 epochs × $85.34 = $256 revenue (sole prover)
 - 3 epochs × $8.53 = $25.59 revenue (10 provers)
-- Claim cost: $1.18
+- Claim cost: $2.19
 
 The profitability gate auto-adjusts: if prices drop or competition rises, it batches
 more epochs before claiming.
@@ -218,7 +226,7 @@ Applied vs testnet baseline:
 
 ## Operational Checklist
 
-- [ ] Fund prover EOA with ~0.3 ETH for Phase 1 gas (~90 days at $5.63/day)
+- [ ] Fund prover EOA with ~2 ETH for Phase 1 gas (~90 days at ~$38/day)
 - [ ] Set `ETHEREUM_MAINNET_RPC` (public endpoints work at current gas prices)
 - [ ] Run `start-prover-mainnet.sh --dry-run` to verify config
 - [ ] Start proving every epoch immediately (build activity score)

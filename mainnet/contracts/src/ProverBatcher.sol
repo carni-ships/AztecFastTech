@@ -111,7 +111,7 @@ contract ProverBatcher {
 
         // 5. Profitability check
         uint256 ethReceived = address(this).balance - startBalance;
-        uint256 gasCost = (tx.gasprice * (block.gaslimit > 0 ? 500_000 : 500_000)); // estimate
+        uint256 gasCost = tx.gasprice * 4_500_000; // observed: ~4M gas for proof + swap
         uint256 totalCost = gasCost + builderTip;
         if (ethReceived < totalCost + minProfit) {
             revert NotProfitable(ethReceived, totalCost, minProfit);

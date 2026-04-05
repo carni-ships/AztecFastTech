@@ -2,7 +2,7 @@
 
 export const ADDRESSES = {
   // Aztec mainnet contracts
-  rollup: '0x603bb2c05d474794ea97805e8de69bccfb3bca12' as `0x${string}`,
+  rollup: '0xae2001f7e21d5ecabf6234e9fdd1e76f50f74962' as `0x${string}`,
   registry: '0x35b22e09Ee0390539439E24f06Da43D83f90e298' as `0x${string}`,
   aztecToken: '0xA27EC0006e59f245217Ff08CD52A7E8b169E62D2' as `0x${string}`,
 
@@ -82,10 +82,10 @@ export const DEFAULTS = {
   builderTipEth: 0.0005,
   // Slippage tolerance for Uniswap swap (0.5%)
   slippageBps: 50,
-  // Gas estimate for claimAndSell tx (~800k for proof-size calldata + swap)
-  gasEstimate: 800_000n,
-  // Gas estimate for proof submission (observed: 0.00006-0.00008 ETH at ~0.1 gwei)
-  proofSubmissionGas: 800_000n,
+  // Gas estimate for claimAndSell tx (claim + swap + transfer, estimated ~4.5M)
+  gasEstimate: 4_500_000n,
+  // Gas estimate for proof submission (observed successful: 3,945,589 gas on-chain)
+  proofSubmissionGas: 4_000_000n,
   // Poll interval for monitoring (ms)
   monitorIntervalMs: 60_000,
   // Poll interval for claim check (ms) — every 2 epochs (~77 min)

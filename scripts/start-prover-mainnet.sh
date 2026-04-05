@@ -286,7 +286,7 @@ fi
 # The mainnet rollup contract has a 90-day timelock before rewards can be claimed.
 # Once the owner calls setRewardsClaimable(true) after the timelock, the atomic
 # claim+swap pipeline becomes viable. Until then, proving is gas-only cost.
-ROLLUP_CONTRACT="0x603bb2c05d474794ea97805e8de69bccfb3bca12"
+ROLLUP_CONTRACT="0xae2001f7e21d5ecabf6234e9fdd1e76f50f74962"
 REWARDS_CLAIMABLE=$($CAST call "$ROLLUP_CONTRACT" "isRewardsClaimable()(bool)" --rpc-url "$L1_RPC_FIRST" 2>/dev/null || echo "error")
 if [ "$REWARDS_CLAIMABLE" = "true" ]; then
   echo "  Rewards:      CLAIMABLE (atomic claim+swap pipeline ready)"
