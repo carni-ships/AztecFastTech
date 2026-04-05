@@ -15,34 +15,11 @@ Key optimizations over stock Barretenberg:
 
 Full optimization inventory: [docs/optimizations.md](docs/optimizations.md)
 
-## Pre-built Binaries (Apple Silicon)
-
-Download optimized `bb` and `bb-avm` binaries — no build step required:
-
-```bash
-curl -L https://github.com/carni-ships/AztecFastTech/releases/download/v0.1.0/bb -o bb
-curl -L https://github.com/carni-ships/AztecFastTech/releases/download/v0.1.0/bb-avm -o bb-avm
-chmod +x bb bb-avm
-```
-
-Requires Apple Silicon (M1/M2/M3/M4) and macOS 13+. No additional dependencies — all libraries are system-provided.
-
-<details>
-<summary>SHA-256 checksums</summary>
-
-```
-699335b9f4ea0fb6af7938d2d27c13523d5036bb3683b457e315bb2fcc01b0f0  bb
-d41fafbaec722f44b94cfa493543902d99eb91c2166552936c72ae42480610cc  bb-avm
-```
-</details>
-
-Or build from source with `scripts/build-optimized.sh`.
-
 ## Prerequisites
 
 1. **Sepolia ETH** in the prover wallet (for L1 proof submissions)
 2. **Aztec CLI** installed at `~/.aztec/current`
-3. **bb-avm binary** — use the [pre-built download](#pre-built-binaries-apple-silicon) above, or build from `aztec-packages-v4.1.2/barretenberg/cpp`:
+3. **bb-avm binary** built from `aztec-packages-v4.1.2/barretenberg/cpp`:
    ```bash
    cd aztec-packages-v4.1.2/barretenberg/cpp
    cmake --preset default -DCMAKE_BUILD_TYPE=Release
