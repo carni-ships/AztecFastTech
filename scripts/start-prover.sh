@@ -31,10 +31,66 @@ PROVER_THREADS="${PROVER_THREADS:-4}"
 # with file-backed mmap the OS keeps only the working set in RAM.
 export BB_SLOW_LOW_MEMORY=1
 
+# --- Scratch directory for file-backed polynomials ---
+# By default, BB writes mmap'd temp files to $TMPDIR (macOS per-user /var/folders).
+# BB_SCRATCH_DIR lets us redirect to a faster location:
+#   - RAM disk: eliminates filesystem overhead entirely (best if RAM allows)
+#   - /tmp: same APFS volume but avoids macOS per-user temp cleanup daemon
+# The F_NOCACHE flag (set in backing_memory.hpp) prevents UBC double-caching
+# regardless of scratch location, reclaiming 1-3 GiB under 3-agent load.
+#
+# RAM disk sizing: only the ACTIVE working set needs to fit. With BB_STORAGE_BUDGET
+# capping file-backed allocation, a 2 GiB RAM disk covers most circuit scratch.
+# Larger circuits (root rollup 2^24) overflow to SSD which is fine — they run solo.
+BB_RAMDISK_SIZE_MB="${BB_RAMDISK_SIZE_MB:-0}"  # 0 = disabled (default)
+BB_RAMDISK_PATH="/Volumes/BBScratch"
+
+if [ "$BB_RAMDISK_SIZE_MB" -gt 0 ] 2>/dev/null; then
+  if mount | grep -q "$BB_RAMDISK_PATH"; then
+    echo "  RAM disk already mounted at $BB_RAMDISK_PATH"
+  else
+    SECTORS=$((BB_RAMDISK_SIZE_MB * 2048))  # 512-byte sectors
+    echo "Creating ${BB_RAMDISK_SIZE_MB} MiB RAM disk at $BB_RAMDISK_PATH..."
+    DISK_DEV=$(hdiutil attach -nomount ram://$SECTORS 2>/dev/null)
+    if [ -n "$DISK_DEV" ]; then
+      DISK_DEV=$(echo "$DISK_DEV" | tr -d '[:space:]')
+      diskutil erasevolume HFS+ "BBScratch" "$DISK_DEV" >/dev/null 2>&1
+      if mount | grep -q "$BB_RAMDISK_PATH"; then
+        echo "  RAM disk ready: $BB_RAMDISK_PATH (${BB_RAMDISK_SIZE_MB} MiB)"
+      else
+        echo "  WARNING: RAM disk format failed. Using default scratch dir."
+        hdiutil detach "$DISK_DEV" >/dev/null 2>&1 || true
+      fi
+    else
+      echo "  WARNING: RAM disk creation failed (insufficient memory?). Using default scratch dir."
+    fi
+  fi
+  if mount | grep -q "$BB_RAMDISK_PATH"; then
+    export BB_SCRATCH_DIR="$BB_RAMDISK_PATH"
+  fi
+elif [ -n "${BB_SCRATCH_DIR:-}" ]; then
+  mkdir -p "$BB_SCRATCH_DIR" 2>/dev/null || true
+  echo "  Scratch dir: $BB_SCRATCH_DIR"
+fi
+
+# Redirect BB temp files to scratch dir.
+# backing_memory.hpp and ultra_prover.cpp use std::filesystem::temp_directory_path()
+# which reads TMPDIR on macOS. Setting TMPDIR is the only way to redirect scratch
+# files without patching the C++ code.
+if [ -n "${BB_SCRATCH_DIR:-}" ] && [ -d "$BB_SCRATCH_DIR" ]; then
+  export TMPDIR="$BB_SCRATCH_DIR"
+fi
+
 # Reduce agent poll interval from default 1000ms to 100ms.
 # With 98 proofs/epoch, default 1000ms wastes ~49s on average idle-to-pickup time.
 # At 100ms: ~5s total idle time. Net saving: ~44s per epoch.
 export PROVER_AGENT_POLL_INTERVAL_MS=100
+
+# Witness prefetch: during heartbeats, agent peeks at the next queued job and
+# pre-fetches its inputs while the current proof runs. Saves ~10-50ms per proof
+# transition (input deserialization overlap). Safe: peek is read-only, prefetch
+# is discarded on job mismatch. Requires patch 08 (apply_witness_prefetch.js).
+export PROVER_WITNESS_PREFETCH="${PROVER_WITNESS_PREFETCH:-1}"
 
 # Preemptive job dispatch: when an agent heartbeats on a low-priority job
 # (e.g., base rollup) and a higher-priority job is queued (e.g., merge rollup),
@@ -47,6 +103,31 @@ export PROVER_BROKER_PREEMPTION_THRESHOLD_MS=2000
 export PROVER_BROKER_BATCH_INTERVAL_MS=500
 export PROVER_BROKER_BATCH_SIZE=1000
 
+# Memory-aware scheduling: two-tier concurrency limits on large proofs.
+# Heavy (2^23+): CHECKPOINT_ROOT, ROOT_ROLLUP — max 1 concurrent.
+# Large (2^22+): includes tx_base_rollup, parity, block_root — max 2 concurrent.
+# Third agent handles light proofs (2^21 and below) or waits.
+# This prevents 3 concurrent 5+ GiB proofs from causing 6+ GB swap on 18 GiB.
+export PROVER_MAX_CONCURRENT_HEAVY="${PROVER_MAX_CONCURRENT_HEAVY:-1}"
+export PROVER_MAX_CONCURRENT_LARGE="${PROVER_MAX_CONCURRENT_LARGE:-2}"
+
+# Adaptive per-proof thread count: override bb HARDWARE_CONCURRENCY per circuit size.
+# Format: "dyadicSize:threads,..." (log2 gate count : thread count).
+# Default (built into execute.js): 24:6,23:4,22:4,21:3,20:2
+# Uncomment to override:
+#   export PROVER_THREAD_MAP="24:6,23:4,22:4,21:3,20:2"
+
+# --- Tx collection fix for P2P-disabled prover nodes ---
+# With --p2p-enabled false, the prover has no P2P gossip or reqresp peers, so the
+# only way to fetch transaction data for proving is via RPC to an Aztec node.
+# TX_COLLECTION_NODE_RPC_URLS tells the TxProvider's FastTxCollection to query
+# the specified Aztec node(s) for missing txs. Without this, gatherTxs() fails
+# with "Txs not found for epoch" because: mempool is empty (no gossip), proposal
+# body is absent (we're proving a block, not attesting), and P2P reqresp returns
+# nothing (DummyP2PService). The node RPC source uses the getTxsByHash endpoint
+# on the remote Aztec node, which has the txs in its archiver.
+export TX_COLLECTION_NODE_RPC_URLS="$AZTEC_NODE_URL"
+
 # --- Archiver & broker tuning ---
 # Reduce archiver L1 polling to avoid rate-limiting on public RPCs.
 # Default 500ms is aggressive; 2000ms cuts L1 queries by 4x during sync.
@@ -57,7 +138,7 @@ export ARCHIVER_POLLING_INTERVAL_MS=2000
 export ARCHIVER_BATCH_SIZE=500
 
 # Cap LMDB database sizes to prevent unbounded growth on small machines.
-export ARCHIVER_STORE_MAP_SIZE_KB=409600       # 400 MB archiver DB cap
+export ARCHIVER_STORE_MAP_SIZE_KB=1048576      # 1 GB archiver DB cap (was 400MB, hit 393MB)
 export WS_DB_MAP_SIZE_KB=512000                # 500 MB world state cap
 export WS_NUM_HISTORIC_CHECKPOINTS=8           # Keep only recent checkpoints
 
@@ -66,7 +147,10 @@ export WS_NUM_HISTORIC_CHECKPOINTS=8           # Keep only recent checkpoints
 export PROVER_BROKER_MAX_EPOCHS_TO_KEEP_RESULTS_FOR=1
 
 # Auto-detect agent count based on available RAM and current memory pressure
-if [ -z "${PROVER_AGENTS+x}" ] || [ "$PROVER_AGENTS" = "3" ]; then
+# Skip auto-detect if PROVER_AGENTS_OVERRIDE is set (e.g., after memory optimizations)
+if [ -n "${PROVER_AGENTS_OVERRIDE:-}" ]; then
+  PROVER_AGENTS="$PROVER_AGENTS_OVERRIDE"
+elif [ -z "${PROVER_AGENTS+x}" ] || [ "$PROVER_AGENTS" = "3" ]; then
   TOTAL_MEM_GB=$(sysctl -n hw.memsize 2>/dev/null | awk '{printf "%d", $1/1073741824}')
 
   # Check current memory pressure (macOS: vm_stat free+inactive pages)
@@ -93,12 +177,24 @@ if [ -z "${PROVER_AGENTS+x}" ] || [ "$PROVER_AGENTS" = "3" ]; then
     echo "WARNING: Low available memory (${FREE_MEM_GB} GiB free). Using 1 agent to avoid swap."
   fi
 
+  # Pre-flight memory cleanup: kill dev language servers and flush caches
+  # Dev LSPs (clangd, SourceKit) consume 3-5 GiB RSS and respawn when editors reopen
+  if [ "${SKIP_MEMORY_CLEANUP:-}" != "1" ]; then
+    echo "Pre-flight memory cleanup (set SKIP_MEMORY_CLEANUP=1 to skip)..."
+    pkill -f clangd 2>/dev/null && echo "  Killed clangd (saves ~1-3 GiB)" || true
+    pkill -f SourceKitService 2>/dev/null && echo "  Killed SourceKitService (saves ~1 GiB)" || true
+    pkill -f sourcekit-lsp 2>/dev/null || true
+    # Flush inactive pages and file cache — recovers 2-6 GiB on macOS
+    sudo purge 2>/dev/null && echo "  Flushed page cache" || true
+    sleep 2  # let OS reclaim pages
+  fi
+
   # Detect active swap usage — swap kills proving performance (10-100x slower)
   SWAP_USED_MB=0
   if command -v sysctl >/dev/null 2>&1; then
     SWAP_USED_MB=$(sysctl -n vm.swapusage 2>/dev/null | awk -F'[= ]+' '/used/ {for(i=1;i<=NF;i++) if($i=="used") {gsub(/M/,"",$(i+1)); printf "%d", $(i+1)}}' || echo "0")
   fi
-  if [ "$SWAP_USED_MB" -gt 1024 ] 2>/dev/null; then
+  if [ "$SWAP_USED_MB" -gt 2048 ] 2>/dev/null; then
     echo "WARNING: ${SWAP_USED_MB} MB swap in use. Proving performance will be severely degraded."
     echo "  Consider closing other applications or reducing agent count."
     if [ "$PROVER_AGENTS" -gt 1 ]; then
@@ -210,6 +306,7 @@ echo "  Agents:     $PROVER_AGENTS × $PROVER_THREADS threads"
 echo "  bb binary:  $BB_BINARY"
 echo "  acvm binary: $ACVM_BINARY"
 echo "  bb workdir: $BB_WORK_DIR"
+echo "  Scratch dir: ${BB_SCRATCH_DIR:-\$TMPDIR (default)}"
 echo "  Data dir:   $DATA_DIR"
 echo ""
 
@@ -235,13 +332,30 @@ if [ -f "$SRS_FILE" ]; then
   PREWARM_PID=$!
 fi
 
-# Pre-warm poly cache dir and existing cached polys (reduces first-proof I/O)
-POLY_CACHE_DIR="/tmp/bb-poly-cache"
+# Pre-warm cross-process precomputed polynomial cache.
+# bb writes precomputed polys (selectors, sigma, ID, tables) to this directory
+# after the first proof of each circuit type. Subsequent agents (same or different
+# bb process) load them via MAP_SHARED mmap, so all 3 agents share the same
+# physical pages for identical circuits. Saves ~960 MB page cache per circuit type
+# at 2^20, and ~500ms recomputation time per proof on agents 2 and 3.
+# Override location: BB_POLY_CACHE_DIR=/path/to/dir
+POLY_CACHE_DIR="${BB_POLY_CACHE_DIR:-/tmp/bb-poly-cache}"
+export BB_POLY_CACHE_DIR="$POLY_CACHE_DIR"
 mkdir -p "$POLY_CACHE_DIR"
 CACHE_SIZE=$(du -sh "$POLY_CACHE_DIR" 2>/dev/null | cut -f1)
-if [ -n "$(ls -A "$POLY_CACHE_DIR" 2>/dev/null)" ]; then
-  echo "Pre-warming poly cache (${CACHE_SIZE})..."
+CACHE_ENTRIES=$(find "$POLY_CACHE_DIR" -name '.complete' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$CACHE_ENTRIES" -gt 0 ]; then
+  echo "Pre-warming poly cache (${CACHE_SIZE}, ${CACHE_ENTRIES} circuit types cached)..."
   find "$POLY_CACHE_DIR" -name '*.bin' -exec cat {} + > /dev/null 2>&1 &
+fi
+
+# --- RAM disk cleanup on exit ---
+if mount | grep -q "$BB_RAMDISK_PATH" 2>/dev/null; then
+  cleanup_ramdisk() {
+    echo "Ejecting RAM disk $BB_RAMDISK_PATH..."
+    hdiutil detach "$BB_RAMDISK_PATH" -force 2>/dev/null || true
+  }
+  trap cleanup_ramdisk EXIT
 fi
 
 # --- Launch ---
@@ -265,6 +379,32 @@ SPLIT_BROKER="${SPLIT_BROKER:-0}"
 # Ensure SRS prewarm finished before first proof
 if [ -n "${PREWARM_PID:-}" ]; then
   wait "$PREWARM_PID" 2>/dev/null && echo "  SRS page cache warm." || true
+fi
+
+# --- Epoch warmup: pre-warm proving caches for all circuit types ---
+# Two-tier warmup strategy:
+#   1. In-process warmup (--warmup-dir): bb prove_loop daemon warms its in-memory
+#      PrecomputedPolyCache on startup. Fastest tier, ~100-200ms savings per type.
+#      Enabled by BB_WARMUP_DIR env var (passed to daemon via JS patch).
+#   2. Shell warmup (warmup-epoch.sh): separate bb process warms disk poly cache
+#      and OS page cache. Runs concurrently with broker startup.
+#
+# Combined savings: eliminates ~3-16s cold-cache penalty on first epoch.
+# Disable with: SKIP_EPOCH_WARMUP=1
+if [ "${SKIP_EPOCH_WARMUP:-0}" != "1" ] && [ -d "/tmp/bb-file-cache" ]; then
+  # Enable in-process daemon warmup (requires apply_daemon_warmup.js patch)
+  export BB_WARMUP_DIR="/tmp/bb-file-cache"
+  echo "  In-process warmup: BB_WARMUP_DIR=$BB_WARMUP_DIR"
+
+  # Also run shell warmup for disk cache + page cache pre-warming
+  WARMUP_SCRIPT="$BASE_DIR/scripts/warmup-epoch.sh"
+  if [ -x "$WARMUP_SCRIPT" ]; then
+    echo "Running epoch warmup (background)..."
+    BB_BINARY_PATH="$BB_BINARY" "$WARMUP_SCRIPT" &
+    WARMUP_PID=$!
+    # Don't wait — warmup runs concurrently with broker/node startup.
+    # First proofs may still get partial warmup benefit.
+  fi
 fi
 
 # N agents with M threads each: more agents = deeper merge-tree parallelism

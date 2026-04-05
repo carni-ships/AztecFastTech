@@ -1,0 +1,57 @@
+# Adaptive per-proof thread concurrency patch
+#
+# Status: APPLIED to node_modules (JS runtime patch)
+#
+# Patched: ~/.aztec/versions/4.1.3/node_modules/@aztec/bb-prover/dest/bb/execute.js
+#
+# ── What it does ──
+#
+# Replaces the hardcoded getAdaptiveConcurrency() with a configurable system:
+#
+#   1. Maps circuit name patterns -> dyadic sizes (log2 gate count)
+#   2. Looks up thread count from PROVER_THREAD_MAP env var (or defaults)
+#   3. Passes per-proof concurrency to both daemon (JSON protocol) and
+#      process-per-proof (HARDWARE_CONCURRENCY env var) paths
+#
+# Default mapping (optimized for M3 Pro 18 GiB):
+#   2^24 (RootRollup):        6 threads  (~11 GiB peak, single-agent only)
+#   2^23 (CheckpointRoot):    4 threads  (~6 GiB peak, memory-sensitive)
+#   2^22 (BaseRollup/Parity): 4 threads  (~2-3 GiB peak)
+#   2^21 (Merge rollups):     3 threads  (~2.6 GiB peak)
+#   2^20 (BlockRootEmpty):    2 threads  (~1.5 GiB peak)
+#
+# ── Configuration ──
+#
+# Override defaults via env var:
+#   PROVER_THREAD_MAP="24:6,23:4,22:4,21:3,20:2"
+#
+# Format: comma-separated "dyadicSize:threadCount" pairs.
+# Only specified sizes are overridden; unspecified sizes get no adaptive override
+# (falls back to HARDWARE_CONCURRENCY).
+#
+# ── Backwards compatibility ──
+#
+# - If PROVER_THREAD_MAP is not set, uses built-in defaults
+# - If a circuit type is not recognized, returns undefined -> falls back to
+#   HARDWARE_CONCURRENCY env var (existing behavior)
+# - If HARDWARE_CONCURRENCY is also not set, bb uses its own default
+#
+# ── Key fix from prior version ──
+#
+# CheckpointRootRollup was previously grouped with RootRollup at 6 threads.
+# Now correctly mapped to 4 threads (2^23 = ~6 GiB peak), reducing memory
+# amplification when running 3 agents concurrently.
+#
+# ── How to re-apply after npm install ──
+#
+# The patch modifies execute.js in-place. To re-apply:
+#   1. Copy the getAdaptiveConcurrency block from this patch description
+#   2. Or run: node scripts/apply-patches.js (if available)
+#
+# ── Diff summary ──
+#
+# Replaced lines 161-176 (old getAdaptiveConcurrency) with:
+#   - _CIRCUIT_DYADIC_SIZE: pattern -> size mapping table
+#   - _DEFAULT_CONCURRENCY_MAP: size -> thread count defaults
+#   - _getThreadMap(): lazy parser for PROVER_THREAD_MAP env var
+#   - getAdaptiveConcurrency(): two-step lookup (name -> size -> threads)

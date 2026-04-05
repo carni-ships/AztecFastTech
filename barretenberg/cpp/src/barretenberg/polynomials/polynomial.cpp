@@ -313,18 +313,39 @@ template <typename Fr> Polynomial<Fr> Polynomial<Fr>::reverse() const
 
 template <typename Fr> void Polynomial<Fr>::serialize_to_file(const std::string& path) const
 {
-    std::ofstream file(path, std::ios::binary);
-    if (!file) {
+    // Use low-level I/O with large buffer for better throughput than std::ofstream.
+    // At 2^24 (512 MiB per poly), the default 8 KiB stdio buffer causes excessive syscalls.
+    int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
         throw_or_abort("Failed to open file for polynomial serialization: " + path);
     }
+#ifdef __APPLE__
+    // Hint to macOS: don't cache this data in the unified buffer cache.
+    // The data will be read back via mmap (which bypasses the cache anyway),
+    // so caching the write path just evicts useful pages.
+    fcntl(fd, F_NOCACHE, 1);
+#endif
     uint64_t si = start_index();
     uint64_t ei = end_index();
     uint64_t vs = virtual_size();
-    file.write(reinterpret_cast<const char*>(&si), sizeof(si));
-    file.write(reinterpret_cast<const char*>(&ei), sizeof(ei));
-    file.write(reinterpret_cast<const char*>(&vs), sizeof(vs));
-    // Write the raw coefficient data (size() elements starting from data())
-    file.write(reinterpret_cast<const char*>(data()), static_cast<std::streamsize>(size() * sizeof(Fr)));
+    // Write header
+    uint64_t header[3] = { si, ei, vs };
+    [[maybe_unused]] auto h = write(fd, header, sizeof(header));
+    // Write data in 4 MiB chunks for efficient I/O
+    const char* ptr = reinterpret_cast<const char*>(data());
+    size_t remaining = size() * sizeof(Fr);
+    constexpr size_t WRITE_CHUNK = 4 * 1024 * 1024; // 4 MiB
+    while (remaining > 0) {
+        size_t to_write = std::min(remaining, WRITE_CHUNK);
+        ssize_t written = write(fd, ptr, to_write);
+        if (written <= 0) {
+            close(fd);
+            throw_or_abort("Write failed during polynomial serialization: " + path);
+        }
+        ptr += written;
+        remaining -= static_cast<size_t>(written);
+    }
+    close(fd);
 }
 
 template <typename Fr> Polynomial<Fr> Polynomial<Fr>::deserialize_from_file(const std::string& path)
@@ -416,6 +437,8 @@ template <typename Fr> Polynomial<Fr> Polynomial<Fr>::mmap_from_file(const std::
 
     // Advise OS for sequential access (enables aggressive readahead)
     madvise(addr, total_bytes, MADV_SEQUENTIAL);
+    // Also request immediate prefetch of pages — starts I/O before first access
+    madvise(addr, total_bytes, MADV_WILLNEED);
 
     // Data starts after the header
     Fr* data_ptr = reinterpret_cast<Fr*>(static_cast<char*>(addr) + header_bytes);

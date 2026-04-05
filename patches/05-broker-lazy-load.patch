@@ -1,0 +1,41 @@
+--- Broker Lazy-Load Patch ---
+Purpose: Reduce broker memory usage by not loading settled job results into memory at startup.
+Files modified:
+  - ~/.aztec/versions/4.1.3/node_modules/@aztec/prover-client/dest/proving_broker/proving_broker.js
+  - ~/.aztec/versions/4.1.3/node_modules/@aztec/prover-client/dest/proving_broker/proving_broker_database/persisted.js
+
+Description:
+  On startup, the broker iterates all historical proving jobs from LMDB and loads both
+  job metadata and full result payloads into in-memory Maps. For 500+ settled jobs,
+  the result payloads (serialized proofs, public inputs) consume significant heap memory.
+
+  This patch:
+  1. In persisted.js (SingleEpochDatabase.allProvingJobs): Skip deserializing result
+     payloads via jsonParseWithSchema. Instead, return a lightweight sentinel object
+     { status: 'fulfilled', value: '[lazy-not-loaded]' } when a result exists.
+
+  2. In proving_broker.js (ProvingBroker.start): For settled jobs, store only the
+     lightweight sentinel in resultsCache instead of the full result. This preserves
+     the duplicate-enqueue guard (resultsCache.has(id)) and the completed-job check
+     without holding the actual proof data.
+
+  Pending (unsettled) jobs are still fully restored and re-enqueued as before.
+
+Estimated savings:
+  - Avoids deserializing 483 result payloads (jsonParseWithSchema + schema validation)
+  - Reduces V8 heap by avoiding storage of proof data (~5-20KB per result serialized,
+    3-5x expansion in V8 objects = ~10-50MB for current workload, more for longer runs)
+  - Reduces LMDB page faults: result values no longer need to be read from disk
+  - Faster startup: skips ~483 jsonParseWithSchema calls
+
+To revert:
+  Reinstall the aztec package: cd ~/.aztec && ./aztec-install.sh
+  Or restore from git: the original files are the npm-distributed versions.
+
+Safety:
+  - Settled jobs from previous sessions are never re-queried for their actual result
+    by the orchestrator (which creates fresh job IDs per epoch)
+  - The resultsCache.has(id) guard still works (sentinel is truthy)
+  - getCompletedJobs only checks .has(), not .get()
+  - cleanUpProvingJobState still deletes sentinel entries normally
+  - GC (deleteAllProvingJobsOlderThanEpoch) still works at DB level

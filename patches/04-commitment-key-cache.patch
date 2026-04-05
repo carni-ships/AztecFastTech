@@ -1,0 +1,47 @@
+--- a/barretenberg/cpp/src/barretenberg/commitment_schemes/commitment_key.hpp
++++ b/barretenberg/cpp/src/barretenberg/commitment_schemes/commitment_key.hpp
+@@ -29,6 +29,7 @@
+ namespace bb {
+
++#include <mutex>
++#include <unordered_map>
++
+ template <class Curve> class CommitmentKey {
+
+     using Fr = typename Curve::ScalarField;
+@@ -63,6 +66,34 @@ template <class Curve> class CommitmentKey {
+ #endif
+     }
+
++    /**
++     * @brief Get or create a cached CommitmentKey for the given SRS size.
++     *
++     * @details Within a persistent bb-avm process, the same circuit types are proved
++     * repeatedly (e.g. 20+ PARITY_BASE proofs per epoch). Each proof previously
++     * constructed a fresh CommitmentKey, triggering SRS fetch + Metal GPU prewarm
++     * (~150-300ms per proof). This cache eliminates that overhead for all but the
++     * first proof of each circuit size.
++     *
++     * The cache grows monotonically (never evicts) because:
++     * - There are only ~6 distinct circuit sizes per epoch
++     * - Each CK holds a shared_ptr to the SRS (no extra memory)
++     * - Metal GPU buffers are already cached separately
++     *
++     * Thread-safe: protected by a mutex since multiple proving threads may request
++     * CKs concurrently in multi-agent configurations.
++     */
++    static CommitmentKey get_or_create(size_t num_points)
++    {
++        static std::mutex cache_mutex;
++        static std::unordered_map<size_t, CommitmentKey> cache;
++
++        std::lock_guard<std::mutex> lock(cache_mutex);
++        auto it = cache.find(num_points);
++        if (it != cache.end()) {
++            return it->second;  // Returns a copy (shared_ptr to SRS, cheap)
++        }
++        auto [inserted, _] = cache.emplace(num_points, CommitmentKey(num_points));
++        return inserted->second;
++    }
++
+     bool initialized() const { return srs != nullptr; }

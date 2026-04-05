@@ -1033,18 +1033,72 @@ template <typename Flavor> class SumcheckProver {
         using Poly = bb::Polynomial<FF>;
         const size_t dest_virtual_size = round.round_size >> 1;
 
-        for (size_t j = 0; j < streaming_all_poly_paths_.size(); j++) {
+        // Prefetch-ahead: mmap the next polynomial while processing the current one.
+        // This overlaps disk I/O with computation, hiding page fault latency.
+        std::future<Poly> next_source;
+        auto prefetch_poly = [&](size_t idx) -> Poly {
+            while (idx < streaming_all_poly_paths_.size() && streaming_all_poly_paths_[idx].empty()) {
+                idx++;
+            }
+            if (idx < streaming_all_poly_paths_.size()) {
+                return Poly::mmap_from_file(streaming_all_poly_paths_[idx]);
+            }
+            return Poly();
+        };
+
+        // Find first non-empty poly and start prefetch
+        size_t first_j = 0;
+        while (first_j < streaming_all_poly_paths_.size() && streaming_all_poly_paths_[first_j].empty()) {
+            first_j++;
+        }
+
+        for (size_t j = first_j; j < streaming_all_poly_paths_.size(); j++) {
             if (streaming_all_poly_paths_[j].empty()) {
                 continue;
             }
-            // mmap source for zero-copy read (OS handles paging + readahead)
-            auto source = Poly::mmap_from_file(streaming_all_poly_paths_[j]);
+
+            // Get current source (either from prefetch or fresh load)
+            Poly source;
+            if (next_source.valid()) {
+                source = next_source.get();
+            } else {
+                source = Poly::mmap_from_file(streaming_all_poly_paths_[j]);
+            }
+
+            // Start prefetching next polynomial while we process this one
+            size_t next_j = j + 1;
+            while (next_j < streaming_all_poly_paths_.size() && streaming_all_poly_paths_[next_j].empty()) {
+                next_j++;
+            }
+            if (next_j < streaming_all_poly_paths_.size()) {
+                next_source = std::async(std::launch::async, prefetch_poly, next_j);
+            }
 
             size_t limit = source.end_index();
             size_t desired_size = (limit / 2) + (limit % 2);
             Poly dest(desired_size, dest_virtual_size, Poly::DontZeroMemory::FLAG);
-            for (size_t i = 0; i < limit; i += 2) {
-                dest.at(i >> 1) = source[i] + round_challenge * (source[i + 1] - source[i]);
+
+            // Parallelize partial evaluation for large polynomials.
+            // At 2^24, this processes 8M pairs — worth parallelizing.
+            // Precompute (1 - challenge) to use the equivalent form:
+            //   dest[i/2] = src[i] * one_minus_r + src[i+1] * r
+            // This avoids the subtraction and uses two independent multiplies
+            // that are more pipeline-friendly.
+            const FF one_minus_r = FF::one() - round_challenge;
+            constexpr size_t PARALLEL_THRESHOLD = 1 << 16; // 64K pairs
+            size_t num_pairs = limit / 2;
+            if (num_pairs >= PARALLEL_THRESHOLD) {
+                parallel_for([&](const ThreadChunk& chunk) {
+                    auto range = chunk.range(num_pairs);
+                    for (size_t pair_idx : range) {
+                        size_t i = pair_idx * 2;
+                        dest.at(pair_idx) = source[i] * one_minus_r + source[i + 1] * round_challenge;
+                    }
+                });
+            } else {
+                for (size_t i = 0; i < limit; i += 2) {
+                    dest.at(i >> 1) = source[i] * one_minus_r + source[i + 1] * round_challenge;
+                }
             }
             source = Poly(); // munmap
 

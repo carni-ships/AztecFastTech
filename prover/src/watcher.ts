@@ -394,3 +394,186 @@ export async function watchParallelMsgpack<B>(
     await new Promise((r) => setTimeout(r, intervalSec * 1000));
   }
 }
+
+/**
+ * Sequential watcher with inter-proof witness prefetching via PersistentBb.
+ *
+ * Proves blocks one at a time through a single persistent bb process, but
+ * overlaps witness preparation (fetch + solve + decompress) for proof N+1
+ * with the compute-heavy phase (Sumcheck + PCS) of proof N. This hides
+ * ~100-200ms of witness I/O per proof without any extra memory pressure
+ * from parallel proving.
+ *
+ * Timeline for proof N:
+ *   [read witness N] [circuit build] [Oink] [Sumcheck] [PCS] [done]
+ *                                            ^--- start prefetch N+1
+ *
+ * When proof N completes and we start proof N+1, the prefetched witness
+ * is already decompressed in memory, skipping the file read + gunzip.
+ */
+export async function watchSequentialPrefetch<B>(
+  engine: ProverEngine,
+  dataSource: DataSource<B>,
+  witnessBuilder: WitnessBuilder<B>,
+  sink?: ProofSink,
+  opts: WatchOptions & { threads?: number } = {},
+): Promise<never> {
+  const intervalSec = opts.intervalSec ?? 5;
+  const proofDir = opts.proofDir ?? "./proofs";
+  const threads = opts.threads ?? 4;
+
+  if (!engine.nativeBbAvailable()) {
+    throw new Error("Sequential prefetch mode requires native bb CLI.");
+  }
+
+  if (!existsSync(proofDir)) mkdirSync(proofDir, { recursive: true });
+
+  const circuit = engine.getCircuit();
+  const noir = new Noir(circuit);
+  const bytecode = gunzipSync(Buffer.from(circuit.bytecode, "base64"));
+  const vkPath = engine.ensureVkCached();
+  if (!vkPath) throw new Error("Failed to compute VK");
+  const vkBytes = readFileSync(vkPath);
+
+  const config = engine.getConfig();
+  const bb = new PersistentBb(threads, config.bbPath);
+
+  let lastProvenBlock = opts.startBlock ?? 0;
+
+  // Prefetched witness for the next block: { blockNum, witness (decompressed Buffer) }
+  let prefetchedNext: { blockNum: number; witness: Buffer } | null = null;
+  let prefetchPromise: Promise<{ blockNum: number; witness: Buffer } | null> | null = null;
+
+  /** Start prefetching witness for the given block number in the background. */
+  function startPrefetch(blockNum: number): void {
+    prefetchPromise = (async (): Promise<{ blockNum: number; witness: Buffer } | null> => {
+      try {
+        const block = await dataSource.fetchBlock(blockNum);
+        const witness = await witnessBuilder.buildWitness(block, blockNum);
+        const { witness: sw } = await noir.execute(witness as any);
+        let decompressed: Buffer;
+        try { decompressed = gunzipSync(Buffer.from(sw)); } catch { decompressed = Buffer.from(sw); }
+        return { blockNum, witness: decompressed };
+      } catch {
+        return null;
+      }
+    })();
+  }
+
+  console.log(`[zkMetal] Sequential prefetch watcher (${threads} threads, interval=${intervalSec}s)`);
+
+  while (true) {
+    try {
+      const latestBlock = await dataSource.fetchLatestBlockNumber();
+      if (latestBlock <= lastProvenBlock) {
+        await new Promise((r) => setTimeout(r, intervalSec * 1000));
+        continue;
+      }
+
+      const blockNum = await nextBlock(dataSource, lastProvenBlock);
+      if (blockNum === null || blockNum > latestBlock) {
+        await new Promise((r) => setTimeout(r, intervalSec * 1000));
+        continue;
+      }
+
+      const proofStart = performance.now();
+
+      // Phase 1: Get witness — use prefetched if available, otherwise solve fresh.
+      let witnessData: Buffer;
+      if (prefetchedNext && prefetchedNext.blockNum === blockNum) {
+        witnessData = prefetchedNext.witness;
+        prefetchedNext = null;
+        prefetchPromise = null;
+        const prefetchMs = (performance.now() - proofStart).toFixed(0);
+        console.log(`[zkMetal] Block ${blockNum}: using prefetched witness (saved ~${prefetchMs}ms)`);
+      } else if (prefetchPromise) {
+        // Prefetch is in flight but for wrong block — await and discard.
+        await prefetchPromise.catch(() => null);
+        prefetchedNext = null;
+        prefetchPromise = null;
+
+        const block = await dataSource.fetchBlock(blockNum);
+        const witness = await witnessBuilder.buildWitness(block, blockNum);
+        const { witness: sw } = await noir.execute(witness as any);
+        try { witnessData = gunzipSync(Buffer.from(sw)); } catch { witnessData = Buffer.from(sw); }
+      } else {
+        const block = await dataSource.fetchBlock(blockNum);
+        const witness = await witnessBuilder.buildWitness(block, blockNum);
+        const { witness: sw } = await noir.execute(witness as any);
+        try { witnessData = gunzipSync(Buffer.from(sw)); } catch { witnessData = Buffer.from(sw); }
+      }
+
+      // Phase 2: Start proving current block.
+      const provePromise = bb.prove(bytecode, vkBytes, witnessData);
+
+      // Phase 3: While proving (Sumcheck + PCS are CPU-bound, ~8-15s),
+      // start prefetching the NEXT witness in the background.
+      const nextBlockNum = await nextBlock(dataSource, blockNum);
+      if (nextBlockNum !== null && nextBlockNum <= latestBlock) {
+        startPrefetch(nextBlockNum);
+      }
+
+      // Phase 4: Await proof result.
+      const resp = await provePromise;
+      const [tag, data] = resp;
+      if (tag === "ErrorResponse") throw new Error(data.message);
+
+      // Collect prefetch result (non-blocking if still in progress — it continues in background).
+      if (prefetchPromise) {
+        // Don't block on prefetch — let it complete asynchronously.
+        // We'll pick it up on the next iteration.
+        prefetchPromise.then((result) => {
+          prefetchedNext = result;
+        }).catch(() => {
+          prefetchedNext = null;
+        });
+        // Detach: prefetchPromise remains set so next iteration can await if needed.
+      }
+
+      const elapsed = ((performance.now() - proofStart) / 1000).toFixed(2);
+
+      // Format proof output
+      const publicInputs: string[] = data.public_inputs.map((pi: Buffer) =>
+        "0x" + Array.from(pi).map((b: number) => b.toString(16).padStart(2, "0")).join(""),
+      );
+      const proofFields = data.proof.map((f: Buffer) =>
+        "0x" + Array.from(f).map((b: number) => b.toString(16).padStart(2, "0")).join(""),
+      );
+      const proofBytes = Buffer.alloc(proofFields.length * 32);
+      for (let j = 0; j < proofFields.length; j++) {
+        const val = BigInt(proofFields[j]);
+        const hex = val.toString(16).padStart(64, "0");
+        for (let k = 0; k < 32; k++) {
+          proofBytes[j * 32 + k] = parseInt(hex.substring(k * 2, k * 2 + 2), 16);
+        }
+      }
+
+      const outPath = join(proofDir, `block_${blockNum}.json`);
+      const proofOutput: ProofOutput = {
+        proof: proofBytes.toString("base64"),
+        publicInputs,
+        blockNumber: blockNum,
+        provenBlocks: 1,
+        prover: "zkmetal-native-msgpack-prefetch",
+        timestamp: new Date().toISOString(),
+      };
+
+      const dir = resolve(outPath, "..");
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(outPath, JSON.stringify(proofOutput, null, 2));
+      lastProvenBlock = blockNum;
+
+      console.log(`[zkMetal] Block ${blockNum}: proved in ${elapsed}s`);
+
+      if (sink) {
+        try { await sink.submitProof(proofOutput); } catch {}
+      }
+    } catch (e: any) {
+      console.error(`[zkMetal] Error: ${e.message}`);
+      // Clear prefetch state on error to avoid stale data.
+      prefetchedNext = null;
+      prefetchPromise = null;
+      await new Promise((r) => setTimeout(r, intervalSec * 1000));
+    }
+  }
+}

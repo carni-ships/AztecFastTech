@@ -328,27 +328,83 @@ template <typename Curve> class GeminiProver_ {
             Polynomial full_batched(full_batched_size);
 
             // Process unshifted polynomials: mmap from disk one at a time (zero-copy read)
-            for (const auto& path : unshifted_paths) {
-                if (path.empty()) {
-                    running_scalar *= challenge;
-                    continue;
+            // Prefetch-ahead: mmap the next polynomial before processing the current one,
+            // so the OS has the full add_scaled duration to prefetch pages into RAM.
+            // On Apple SSD (~5 GB/s), a 512 MiB poly takes ~100ms to page in;
+            // add_scaled takes ~50-150ms, so overlap hides most of the I/O.
+            {
+                // Find first non-empty path index
+                auto next_nonempty = [](const std::vector<std::string>& paths, size_t from) -> size_t {
+                    for (size_t i = from; i < paths.size(); i++) {
+                        if (!paths[i].empty()) return i;
+                    }
+                    return paths.size();
+                };
+
+                // Pre-mmap the first non-empty poly to kick off readahead
+                size_t cur_idx = next_nonempty(unshifted_paths, 0);
+                Polynomial prefetched;
+                if (cur_idx < unshifted_paths.size()) {
+                    prefetched = Polynomial::mmap_from_file(unshifted_paths[cur_idx]);
                 }
-                auto poly = Polynomial::mmap_from_file(path);
-                batched_unshifted.add_scaled(poly, running_scalar);
-                running_scalar *= challenge;
-                // poly goes out of scope here, munmap frees virtual mapping
+
+                for (size_t i = 0; i < unshifted_paths.size(); i++) {
+                    if (unshifted_paths[i].empty()) {
+                        running_scalar *= challenge;
+                        continue;
+                    }
+                    // Use prefetched poly if available, otherwise mmap now
+                    Polynomial poly = (i == cur_idx && !prefetched.is_empty())
+                        ? std::move(prefetched)
+                        : Polynomial::mmap_from_file(unshifted_paths[i]);
+
+                    // Prefetch next non-empty poly while we process current one
+                    size_t next_idx = next_nonempty(unshifted_paths, i + 1);
+                    if (next_idx < unshifted_paths.size()) {
+                        prefetched = Polynomial::mmap_from_file(unshifted_paths[next_idx]);
+                        cur_idx = next_idx;
+                    }
+
+                    batched_unshifted.add_scaled(poly, running_scalar);
+                    running_scalar *= challenge;
+                    // poly goes out of scope here, munmap frees virtual mapping
+                }
             }
             full_batched += batched_unshifted;
 
-            // Process to-be-shifted polynomials: mmap from disk one at a time
-            for (const auto& path : shifted_paths) {
-                if (path.empty()) {
-                    running_scalar *= challenge;
-                    continue;
+            // Process to-be-shifted polynomials with same prefetch-ahead pattern
+            {
+                auto next_nonempty = [](const std::vector<std::string>& paths, size_t from) -> size_t {
+                    for (size_t i = from; i < paths.size(); i++) {
+                        if (!paths[i].empty()) return i;
+                    }
+                    return paths.size();
+                };
+
+                size_t cur_idx = next_nonempty(shifted_paths, 0);
+                Polynomial prefetched;
+                if (cur_idx < shifted_paths.size()) {
+                    prefetched = Polynomial::mmap_from_file(shifted_paths[cur_idx]);
                 }
-                auto poly = Polynomial::mmap_from_file(path);
-                batched_to_be_shifted_by_one.add_scaled(poly, running_scalar);
-                running_scalar *= challenge;
+
+                for (size_t i = 0; i < shifted_paths.size(); i++) {
+                    if (shifted_paths[i].empty()) {
+                        running_scalar *= challenge;
+                        continue;
+                    }
+                    Polynomial poly = (i == cur_idx && !prefetched.is_empty())
+                        ? std::move(prefetched)
+                        : Polynomial::mmap_from_file(shifted_paths[i]);
+
+                    size_t next_idx = next_nonempty(shifted_paths, i + 1);
+                    if (next_idx < shifted_paths.size()) {
+                        prefetched = Polynomial::mmap_from_file(shifted_paths[next_idx]);
+                        cur_idx = next_idx;
+                    }
+
+                    batched_to_be_shifted_by_one.add_scaled(poly, running_scalar);
+                    running_scalar *= challenge;
+                }
             }
             full_batched += batched_to_be_shifted_by_one.shifted();
 

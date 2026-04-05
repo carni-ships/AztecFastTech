@@ -1,0 +1,53 @@
+# BB Daemon (prove_loop) integration patch
+#
+# Status: JS side COMPLETE, C++ side NEEDED
+#
+# ── What was done ──
+#
+# Patched: ~/.aztec/versions/4.1.3/node_modules/@aztec/bb-prover/dest/bb/execute.js
+#
+# Added daemon process manager that:
+#   1. Spawns one persistent `bb-avm prove_loop` per flavor (ultra_honk,
+#      ultra_rollup_honk, ultra_keccak_honk) on first prove request
+#   2. Sends prove requests as JSON lines to daemon stdin
+#   3. Reads JSON responses from daemon stdout
+#   4. Falls back to process-per-proof if daemon crashes or returns error
+#   5. Includes `concurrency` in the request for per-circuit thread tuning
+#
+# Control: BB_DAEMON=0 disables the daemon, reverts to stock behavior.
+# Export: shutdownDaemons() can be called for clean process exit.
+#
+# ── What still needs to be built (C++ side) ──
+#
+# The `prove_loop` subcommand does NOT exist in any available bb binary.
+# It must be added to the barretenberg CLI (bbapi_cli.cpp or equivalent).
+#
+# Required behavior:
+#   - Subcommand: `bb-avm prove_loop --scheme ultra_honk --oracle_hash poseidon2 --ipa_accumulation --disable_zk`
+#   - Reads JSON lines from stdin, one per proof request
+#   - Input:  {"bytecode":"/path","witness":"/path","output":"/path","vk":"/path","concurrency":4}
+#   - Output: {"status":"ok","duration_ms":1234} or {"status":"error","message":"..."}
+#   - Keeps SRS, thread pool, and bytecode cache alive between requests
+#   - Must flush stdout after each JSON response line
+#   - Expected savings: ~800ms/proof from avoiding SRS reload + thread pool init
+#
+# Implementation sketch for C++:
+#   while (std::getline(std::cin, line)) {
+#       auto req = nlohmann::json::parse(line);
+#       // set HARDWARE_CONCURRENCY from req["concurrency"] if present
+#       // reuse cached SRS, thread pool
+#       // call existing prove() logic with paths from req
+#       // write JSON result to stdout, flush
+#   }
+#
+# ── Architecture notes ──
+#
+# - 3 prover agents = 3 separate Node.js processes, each gets its own daemon(s)
+# - Within one Node.js process, daemons are keyed by flavor string
+# - Most proofs use ultra_rollup_honk (BaseRollup, merges, block root)
+# - Parity uses ultra_honk, RootRollup uses ultra_keccak_honk
+# - The daemon protocol is serial per flavor (one request at a time per daemon)
+#   which matches how bb prove works (single-threaded dispatch, multi-threaded internally)
+#
+# ── To revert ──
+# Reinstall aztec node or restore original execute.js from npm.

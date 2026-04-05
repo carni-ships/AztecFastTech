@@ -100,30 +100,9 @@ template <typename Flavor> class SumcheckProverRound {
      * is false.
      */
     template <typename ProverPolynomialsOrPartiallyEvaluatedMultivariates>
-    size_t compute_effective_round_size(const ProverPolynomialsOrPartiallyEvaluatedMultivariates& multivariates) const
+    size_t compute_effective_round_size(const ProverPolynomialsOrPartiallyEvaluatedMultivariates& /*multivariates*/) const
     {
-        if constexpr (Flavor::HasZK) {
-            // When ZK is enabled, we must iterate over the full round_size
-            return round_size;
-        } else {
-            // When ZK is disabled, find the maximum end_index() across witness polynomials only
-            // (precomputed polynomials like selectors are always full size)
-            // We need to round up to the next even number since we process edges in pairs
-            size_t max_end_index = 0;
-
-            // Check if the flavor has a get_witness() method to iterate over all witness polynomials
-            if constexpr (requires { multivariates.get_witness(); }) {
-                for (auto& witness_poly : multivariates.get_witness()) {
-                    max_end_index = std::max(max_end_index, witness_poly.end_index());
-                }
-            } else {
-                // Fallback: use full round_size if no get_witness() method available
-                return round_size;
-            }
-
-            // Round up to next even number and ensure we don't exceed round_size
-            return std::min(round_size, max_end_index + (max_end_index % 2));
-        }
+        return round_size;
     }
 
     /**
@@ -159,46 +138,216 @@ template <typename Flavor> class SumcheckProverRound {
                       const ProverPolynomialsOrPartiallyEvaluatedMultivariates& multivariates,
                       const size_t edge_idx)
     {
-        // Delegate to the view-based overload. The get_all() call constructs RefArrays each time;
-        // for hot loops, callers should use the view-based overload with precomputed views instead.
-        extend_edges(extended_edges.get_all(), multivariates.get_all(), edge_idx);
+        for (auto [extended_edge, multivariate] : zip_view(extended_edges.get_all(), multivariates.get_all())) {
+            if constexpr (Flavor::USE_SHORT_MONOMIALS) {
+                extended_edge = bb::Univariate<FF, 2>({ multivariate[edge_idx], multivariate[edge_idx + 1] });
+            } else {
+                if (multivariate.end_index() < edge_idx) {
+                    static const auto zero_univariate = bb::Univariate<FF, MAX_PARTIAL_RELATION_LENGTH>::zero();
+                    extended_edge = zero_univariate;
+                } else {
+                    extended_edge = bb::Univariate<FF, 2>({ multivariate[edge_idx], multivariate[edge_idx + 1] })
+                                        .template extend_to<MAX_PARTIAL_RELATION_LENGTH>();
+                }
+            }
+        }
     }
 
     /**
-     * @brief Index-based extend_edges using precomputed views.
-     * @details Avoids reconstructing RefArrays (~41 pointer copies each) on every call in the hot loop.
-     * Callers precompute the views once and pass them in.
+     * @brief Load only the polynomial values needed for active relations in a block.
+     * Uses a 64-bit bitmask where bit i indicates get_all()[i] should be loaded.
      */
-    template <typename ExtendedEdgeView, typename MultivariateView>
-    void extend_edges(ExtendedEdgeView&& edge_view,
-                      const MultivariateView& poly_view,
-                      const size_t edge_idx)
+    template <typename ProverPolynomialsOrPartiallyEvaluatedMultivariates>
+    void extend_edges_masked(ExtendedEdges& extended_edges,
+                             const ProverPolynomialsOrPartiallyEvaluatedMultivariates& multivariates,
+                             const size_t edge_idx,
+                             uint64_t poly_mask)
     {
-        const size_t n = poly_view.size();
-        for (size_t j = 0; j < n; ++j) {
-            const auto& multivariate = poly_view[j];
+        auto all_edges = extended_edges.get_all();
+        auto all_polys = multivariates.get_all();
+        uint64_t mask = poly_mask;
+        while (mask != 0) {
+            size_t idx = static_cast<size_t>(__builtin_ctzll(mask));
+            mask &= mask - 1;
+            // Prefetch next active poly's edge data to hide L2/L3 latency
+            if (mask != 0) {
+                size_t next_idx = static_cast<size_t>(__builtin_ctzll(mask));
+                __builtin_prefetch(&all_polys[next_idx][edge_idx], 0, 1);
+            }
             if constexpr (Flavor::USE_SHORT_MONOMIALS) {
-                // Fast path: both indices within polynomial's data range [start_index, end_index).
-                // Use at() to skip redundant bounds checking in operator[]'s get().
-                if (edge_idx >= multivariate.start_index() && edge_idx + 2 <= multivariate.end_index()) {
-                    edge_view[j] = bb::Univariate<FF, 2>({ multivariate.at(edge_idx), multivariate.at(edge_idx + 1) });
+                all_edges[idx] = bb::Univariate<FF, 2>({ all_polys[idx][edge_idx], all_polys[idx][edge_idx + 1] });
+            } else {
+                if (all_polys[idx].end_index() < edge_idx) {
+                    all_edges[idx] = bb::Univariate<FF, MAX_PARTIAL_RELATION_LENGTH>::zero();
                 } else {
-                    edge_view[j] = bb::Univariate<FF, 2>({ multivariate[edge_idx], multivariate[edge_idx + 1] });
+                    all_edges[idx] = bb::Univariate<FF, 2>({ all_polys[idx][edge_idx], all_polys[idx][edge_idx + 1] })
+                                         .template extend_to<MAX_PARTIAL_RELATION_LENGTH>();
+                }
+            }
+        }
+    }
+
+    /**
+     * @brief Compute bitmask of which polynomials need loading for a block.
+     *
+     * get_all() order for UltraFlavor (non-ZK): [Precomputed(28), Witness(8), Shifted(5)] = 41
+     * Precomputed: q_m(0) q_c(1) q_l(2) q_r(3) q_o(4) q_4(5) q_lookup(6) q_arith(7)
+     *              q_delta_range(8) q_elliptic(9) q_memory(10) q_nnf(11)
+     *              q_poseidon2_external(12) q_poseidon2_internal(13)
+     *              sigma_1..4(14-17) id_1..4(18-21) table_1..4(22-25)
+     *              lagrange_first(26) lagrange_last(27)
+     * Witness:     w_l(28) w_r(29) w_o(30) w_4(31) z_perm(32)
+     *              lookup_inverses(33) lookup_read_counts(34) lookup_read_tags(35)
+     * Shifted:     w_l_shift(36) w_r_shift(37) w_o_shift(38) w_4_shift(39) z_perm_shift(40)
+     */
+    template <typename Polys>
+    static uint64_t compute_block_poly_mask(const Polys& polynomials, size_t block_start)
+        requires requires {
+            polynomials.q_arith;
+            polynomials.q_delta_range;
+            polynomials.q_elliptic;
+        }
+    {
+        // Permutation relation (always active): sigma, id, lagrange, wires, z_perm, z_perm_shift
+        constexpr uint64_t BASE_MASK =
+            (1ULL << 14) | (1ULL << 15) | (1ULL << 16) | (1ULL << 17) | // sigma_1..4
+            (1ULL << 18) | (1ULL << 19) | (1ULL << 20) | (1ULL << 21) | // id_1..4
+            (1ULL << 26) | (1ULL << 27) |                                 // lagrange_first, lagrange_last
+            (1ULL << 28) | (1ULL << 29) | (1ULL << 30) | (1ULL << 31) | // w_l, w_r, w_o, w_4
+            (1ULL << 32) |                                                 // z_perm
+            (1ULL << 40);                                                  // z_perm_shift
+
+        constexpr uint64_t ALL_SHIFTS =
+            (1ULL << 36) | (1ULL << 37) | (1ULL << 38) | (1ULL << 39); // w_l..w_4_shift
+
+        // Non-gate selectors used by multiple relations
+        constexpr uint64_t NON_GATE_SELECTORS =
+            (1ULL << 0) | (1ULL << 1) | (1ULL << 2) | (1ULL << 3) | (1ULL << 4) | (1ULL << 5); // q_m..q_4
+
+        // Per-relation extra polys beyond BASE_MASK
+        constexpr uint64_t ARITH_EXTRA =
+            NON_GATE_SELECTORS | (1ULL << 7) | (1ULL << 36); // q_arith, w_l_shift
+
+        constexpr uint64_t DELTA_EXTRA = (1ULL << 8) | ALL_SHIFTS;
+        constexpr uint64_t ELLIPTIC_EXTRA = (1ULL << 9) | ALL_SHIFTS;
+        // Memory relation reads q_l, q_r, q_o, q_4, q_c for sub-type selection
+        constexpr uint64_t MEMORY_EXTRA = (1ULL << 10) | NON_GATE_SELECTORS | ALL_SHIFTS;
+        // NNF reads q_m, q_r, q_o, q_4 for sub-gate selection
+        constexpr uint64_t NNF_EXTRA =
+            (1ULL << 11) | NON_GATE_SELECTORS | ALL_SHIFTS;
+        constexpr uint64_t POSEIDON2_EXT_EXTRA =
+            (1ULL << 12) | (1ULL << 2) | (1ULL << 3) | (1ULL << 4) | (1ULL << 5) | ALL_SHIFTS;
+        constexpr uint64_t POSEIDON2_INT_EXTRA = (1ULL << 13) | (1ULL << 2) | ALL_SHIFTS;
+        constexpr uint64_t LOOKUP_EXTRA =
+            (1ULL << 6) |                                                 // q_lookup
+            (1ULL << 22) | (1ULL << 23) | (1ULL << 24) | (1ULL << 25) | // table_1..4
+            (1ULL << 33) | (1ULL << 34) | (1ULL << 35);                  // lookup_inverses, read_counts, read_tags
+
+        uint64_t mask = BASE_MASK;
+
+        if (polynomials.q_arith.end_index() > block_start) {
+            mask |= ARITH_EXTRA;
+        }
+        if (polynomials.q_delta_range.end_index() > block_start) {
+            mask |= DELTA_EXTRA;
+        }
+        if (polynomials.q_elliptic.end_index() > block_start) {
+            mask |= ELLIPTIC_EXTRA;
+        }
+        if (polynomials.q_memory.end_index() > block_start) {
+            mask |= MEMORY_EXTRA;
+        }
+        if (polynomials.q_nnf.end_index() > block_start) {
+            mask |= NNF_EXTRA;
+        }
+        if (polynomials.q_poseidon2_external.end_index() > block_start) {
+            mask |= POSEIDON2_EXT_EXTRA;
+        }
+        if (polynomials.q_poseidon2_internal.end_index() > block_start) {
+            mask |= POSEIDON2_INT_EXTRA;
+        }
+        if (polynomials.q_lookup.end_index() > block_start ||
+            polynomials.lookup_read_counts.end_index() > block_start) {
+            mask |= LOOKUP_EXTRA;
+        }
+
+        return mask;
+    }
+
+    /**
+     * @brief Compute bitmask of which relations are active for a block.
+     *
+     * Maps selector end_index checks to relation indices in the UltraFlavor::Relations tuple:
+     * 0: ArithmeticRelation (q_arith), 1: PermutationRelation (always), 2: LogDerivLookup (q_lookup),
+     * 3: DeltaRange (q_delta_range), 4: Elliptic (q_elliptic), 5: Memory (q_memory),
+     * 6: NonNativeField (q_nnf), 7: Poseidon2External, 8: Poseidon2Internal
+     */
+    template <typename Polys>
+    static uint16_t compute_block_relation_mask(const Polys& polynomials, size_t block_start)
+        requires requires {
+            polynomials.q_arith;
+            polynomials.q_delta_range;
+            polynomials.q_elliptic;
+        }
+    {
+        uint16_t mask = (1U << 1); // Permutation relation always active
+        if (polynomials.q_arith.end_index() > block_start) mask |= (1U << 0);
+        if (polynomials.q_lookup.end_index() > block_start ||
+            polynomials.lookup_read_counts.end_index() > block_start) mask |= (1U << 2);
+        if (polynomials.q_delta_range.end_index() > block_start) mask |= (1U << 3);
+        if (polynomials.q_elliptic.end_index() > block_start) mask |= (1U << 4);
+        if (polynomials.q_memory.end_index() > block_start) mask |= (1U << 5);
+        if (polynomials.q_nnf.end_index() > block_start) mask |= (1U << 6);
+        if (polynomials.q_poseidon2_external.end_index() > block_start) mask |= (1U << 7);
+        if (polynomials.q_poseidon2_internal.end_index() > block_start) mask |= (1U << 8);
+        return mask;
+    }
+
+    /**
+     * @brief Accumulate relation univariates, skipping relations not in the block-level mask.
+     *
+     * Eliminates both the Relation::accumulate AND the Relation::skip() overhead for
+     * relations whose selector is zero throughout the entire block. For active relations,
+     * per-edge skip() checks are retained to handle sparse edges within active blocks.
+     */
+    void accumulate_relation_univariates_masked(SumcheckTupleOfTuplesOfUnivariates& univariate_accumulators,
+                                                 const auto& extended_edges,
+                                                 const bb::RelationParameters<FF>& relation_parameters,
+                                                 const FF& scaling_factor,
+                                                 uint16_t relation_mask)
+    {
+        constexpr_for<0, NUM_RELATIONS, 1>([&]<size_t relation_idx>() {
+            if (!(relation_mask & (1U << relation_idx))) return; // Block-level skip
+            using Relation = std::tuple_element_t<relation_idx, Relations>;
+            if constexpr (isSkippable<Relation, decltype(extended_edges)>) {
+                if (!Relation::skip(extended_edges)) {
+                    Relation::accumulate(std::get<relation_idx>(univariate_accumulators),
+                                         extended_edges,
+                                         relation_parameters,
+                                         scaling_factor);
                 }
             } else {
-                // Fast path: both indices within polynomial's data range [start_index, end_index).
-                // Use at() to skip redundant bounds checking in operator[]'s get().
-                if (edge_idx >= multivariate.start_index() && edge_idx + 2 <= multivariate.end_index()) {
-                    edge_view[j] =
-                        bb::Univariate<FF, 2>({ multivariate.at(edge_idx), multivariate.at(edge_idx + 1) })
-                            .template extend_to<MAX_PARTIAL_RELATION_LENGTH>();
-                } else if (multivariate.end_index() <= edge_idx || edge_idx + 1 < multivariate.start_index()) {
-                    static const auto zero_univariate = bb::Univariate<FF, MAX_PARTIAL_RELATION_LENGTH>::zero();
-                    edge_view[j] = zero_univariate;
+                Relation::accumulate(std::get<relation_idx>(univariate_accumulators),
+                                     extended_edges,
+                                     relation_parameters,
+                                     scaling_factor);
+            }
+        });
+    }
+
+    /**
+     * @brief Zero out extended_edges entries not in the poly mask.
+     */
+    static void zero_inactive_edges(ExtendedEdges& extended_edges, uint64_t poly_mask)
+    {
+        auto all_edges = extended_edges.get_all();
+        const size_t num_polys = all_edges.size();
+        for (size_t i = 0; i < num_polys; ++i) {
+            if (!(poly_mask & (1ULL << i))) {
+                if constexpr (Flavor::USE_SHORT_MONOMIALS) {
+                    all_edges[i] = bb::Univariate<FF, 2>::zero();
                 } else {
-                    // Boundary case (very rare: only at poly start/end edges)
-                    edge_view[j] = bb::Univariate<FF, 2>({ multivariate[edge_idx], multivariate[edge_idx + 1] })
-                                        .template extend_to<MAX_PARTIAL_RELATION_LENGTH>();
+                    all_edges[i] = bb::Univariate<FF, MAX_PARTIAL_RELATION_LENGTH>::zero();
                 }
             }
         }
@@ -310,10 +459,6 @@ template <typename Flavor> class SumcheckProverRound {
     struct BlockOfContiguousRows {
         size_t starting_edge_idx;
         size_t size;
-        // Bitmask of which poly indices (into get_all()) are needed for this block.
-        // Bit j set means poly_view[j] must be loaded; unset means it can be skipped.
-        // Default: all bits set (load everything).
-        uint64_t poly_mask = ~uint64_t(0);
     };
 
     /**
@@ -354,174 +499,6 @@ template <typename Flavor> class SumcheckProverRound {
     };
 
     /**
-     * @brief Index-based extend_edges with poly masking: only loads polys where poly_mask bit is set.
-     * @details For polys where the mask bit is 0, sets the extended edge to a static zero univariate.
-     * This avoids DRAM fetches for polynomials not needed by any relation active in the current block,
-     * saving 40-55% of memory loads in blocks with few active gate types (e.g. delta_range, poseidon2).
-     */
-    template <typename ExtendedEdgeView, typename MultivariateView>
-    void extend_edges_masked(ExtendedEdgeView&& edge_view,
-                             const MultivariateView& poly_view,
-                             const size_t edge_idx,
-                             const uint64_t poly_mask)
-    {
-        const size_t n = poly_view.size();
-        for (size_t j = 0; j < n; ++j) {
-            if (!(poly_mask & (1ULL << j))) {
-                if constexpr (Flavor::USE_SHORT_MONOMIALS) {
-                    edge_view[j] = bb::Univariate<FF, 2>::zero();
-                } else {
-                    static const auto zero_univariate = bb::Univariate<FF, MAX_PARTIAL_RELATION_LENGTH>::zero();
-                    edge_view[j] = zero_univariate;
-                }
-                continue;
-            }
-            const auto& multivariate = poly_view[j];
-            if constexpr (Flavor::USE_SHORT_MONOMIALS) {
-                if (edge_idx >= multivariate.start_index() && edge_idx + 2 <= multivariate.end_index()) {
-                    edge_view[j] = bb::Univariate<FF, 2>({ multivariate.at(edge_idx), multivariate.at(edge_idx + 1) });
-                } else {
-                    edge_view[j] = bb::Univariate<FF, 2>({ multivariate[edge_idx], multivariate[edge_idx + 1] });
-                }
-            } else {
-                if (edge_idx >= multivariate.start_index() && edge_idx + 2 <= multivariate.end_index()) {
-                    edge_view[j] =
-                        bb::Univariate<FF, 2>({ multivariate.at(edge_idx), multivariate.at(edge_idx + 1) })
-                            .template extend_to<MAX_PARTIAL_RELATION_LENGTH>();
-                } else if (multivariate.end_index() <= edge_idx || edge_idx + 1 < multivariate.start_index()) {
-                    static const auto zero_univariate = bb::Univariate<FF, MAX_PARTIAL_RELATION_LENGTH>::zero();
-                    edge_view[j] = zero_univariate;
-                } else {
-                    edge_view[j] = bb::Univariate<FF, 2>({ multivariate[edge_idx], multivariate[edge_idx + 1] })
-                                        .template extend_to<MAX_PARTIAL_RELATION_LENGTH>();
-                }
-            }
-        }
-    }
-
-    /**
-     * @brief Compute per-block poly masks for round 0 (ProverPolynomials).
-     * @details For each block, detects which gate selectors are active by checking selector polynomial
-     * start/end indices against the block range. Then computes the union of poly indices required by
-     * all active relations (always includes permutation). Only works for round 0 where selector polys
-     * retain their original sparse structure.
-     *
-     * Poly index layout for UltraFlavor get_all() (41 polys total):
-     *   Precomputed [0-27]: q_m(0) q_c(1) q_l(2) q_r(3) q_o(4) q_4(5) q_lookup(6) q_arith(7)
-     *     q_delta_range(8) q_elliptic(9) q_memory(10) q_nnf(11) q_poseidon2_ext(12) q_poseidon2_int(13)
-     *     sigma_1-4(14-17) id_1-4(18-21) table_1-4(22-25) lagrange_first(26) lagrange_last(27)
-     *   Witness [28-35]: w_l(28) w_r(29) w_o(30) w_4(31) z_perm(32) lookup_inv(33) read_counts(34) read_tags(35)
-     *   Shifted [36-40]: w_l_shift(36) w_r_shift(37) w_o_shift(38) w_4_shift(39) z_perm_shift(40)
-     */
-    template <typename ProverPolynomialsOrPartiallyEvaluatedMultivariates>
-    static void compute_block_poly_masks(
-        std::vector<BlockOfContiguousRows>& blocks,
-        const ProverPolynomialsOrPartiallyEvaluatedMultivariates& polynomials)
-    {
-        // Only compute masks for UltraHonk-like flavors that have the standard gate selectors.
-        // TranslatorFlavor, ECCVMFlavor, etc. have different polynomial sets.
-        // Also requires round 0 (ProverPolynomials) where selectors retain sparse structure.
-        if constexpr (!requires { polynomials.q_arith; polynomials.q_delta_range; polynomials.q_elliptic; }) {
-            return; // Non-Ultra flavor or later rounds: no masking benefit
-        } else {
-            // Per-relation poly masks (bit j = poly index j in get_all() is needed)
-            // Permutation (always active): sigma_1-4, id_1-4, lagrange_first/last, w_l-w_4, z_perm, z_perm_shift
-            static constexpr uint64_t MASK_PERMUTATION =
-                (1ULL << 14) | (1ULL << 15) | (1ULL << 16) | (1ULL << 17) | // sigma_1-4
-                (1ULL << 18) | (1ULL << 19) | (1ULL << 20) | (1ULL << 21) | // id_1-4
-                (1ULL << 26) | (1ULL << 27) |                                 // lagrange_first, lagrange_last
-                (1ULL << 28) | (1ULL << 29) | (1ULL << 30) | (1ULL << 31) | // w_l, w_r, w_o, w_4
-                (1ULL << 32) | (1ULL << 40);                                 // z_perm, z_perm_shift
-
-            // Arithmetic: q_m, q_c, q_l, q_r, q_o, q_4, q_arith, w_l-w_4, w_l_shift, w_4_shift
-            static constexpr uint64_t MASK_ARITHMETIC =
-                (1ULL << 0) | (1ULL << 1) | (1ULL << 2) | (1ULL << 3) | (1ULL << 4) | (1ULL << 5) | (1ULL << 7) |
-                (1ULL << 28) | (1ULL << 29) | (1ULL << 30) | (1ULL << 31) |
-                (1ULL << 36) | (1ULL << 39);
-
-            // LogDerivLookup: q_lookup, q_m, q_c, q_r, q_o, table_1-4, w_l-w_o, w_l/r/o_shift,
-            //                 lookup_inverses, lookup_read_counts, lookup_read_tags
-            static constexpr uint64_t MASK_LOOKUP =
-                (1ULL << 0) | (1ULL << 1) | (1ULL << 3) | (1ULL << 4) | (1ULL << 6) |
-                (1ULL << 22) | (1ULL << 23) | (1ULL << 24) | (1ULL << 25) |
-                (1ULL << 28) | (1ULL << 29) | (1ULL << 30) |
-                (1ULL << 33) | (1ULL << 34) | (1ULL << 35) |
-                (1ULL << 36) | (1ULL << 37) | (1ULL << 38);
-
-            // DeltaRange: q_delta_range, w_l-w_4, w_l_shift
-            static constexpr uint64_t MASK_DELTA_RANGE =
-                (1ULL << 8) |
-                (1ULL << 28) | (1ULL << 29) | (1ULL << 30) | (1ULL << 31) |
-                (1ULL << 36);
-
-            // Elliptic: q_elliptic, q_m, q_l, w_r, w_o, w_l/r/o/4_shift
-            static constexpr uint64_t MASK_ELLIPTIC =
-                (1ULL << 0) | (1ULL << 2) | (1ULL << 9) |
-                (1ULL << 29) | (1ULL << 30) |
-                (1ULL << 36) | (1ULL << 37) | (1ULL << 38) | (1ULL << 39);
-
-            // Memory: q_memory, q_l, q_r, q_o, q_4, q_m, q_c, w_l-w_4, w_l/r/o/4_shift
-            static constexpr uint64_t MASK_MEMORY =
-                (1ULL << 0) | (1ULL << 1) | (1ULL << 2) | (1ULL << 3) | (1ULL << 4) | (1ULL << 5) | (1ULL << 10) |
-                (1ULL << 28) | (1ULL << 29) | (1ULL << 30) | (1ULL << 31) |
-                (1ULL << 36) | (1ULL << 37) | (1ULL << 38) | (1ULL << 39);
-
-            // NonNativeField: q_nnf, q_r, q_o, q_4, q_m, w_l-w_4, w_l/r/o/4_shift
-            static constexpr uint64_t MASK_NNF =
-                (1ULL << 0) | (1ULL << 3) | (1ULL << 4) | (1ULL << 5) | (1ULL << 11) |
-                (1ULL << 28) | (1ULL << 29) | (1ULL << 30) | (1ULL << 31) |
-                (1ULL << 36) | (1ULL << 37) | (1ULL << 38) | (1ULL << 39);
-
-            // Poseidon2External: q_poseidon2_external, q_l, q_r, q_o, q_4, w_l-w_4, w_l/r/o/4_shift
-            static constexpr uint64_t MASK_POSEIDON2_EXT =
-                (1ULL << 2) | (1ULL << 3) | (1ULL << 4) | (1ULL << 5) | (1ULL << 12) |
-                (1ULL << 28) | (1ULL << 29) | (1ULL << 30) | (1ULL << 31) |
-                (1ULL << 36) | (1ULL << 37) | (1ULL << 38) | (1ULL << 39);
-
-            // Poseidon2Internal: q_poseidon2_internal, q_l, w_l-w_4, w_l/r/o/4_shift
-            static constexpr uint64_t MASK_POSEIDON2_INT =
-                (1ULL << 2) | (1ULL << 13) |
-                (1ULL << 28) | (1ULL << 29) | (1ULL << 30) | (1ULL << 31) |
-                (1ULL << 36) | (1ULL << 37) | (1ULL << 38) | (1ULL << 39);
-
-            // Helper: check if a selector polynomial overlaps with a block range
-            auto overlaps = [](const auto& poly, size_t block_start, size_t block_end) -> bool {
-                return poly.start_index() < block_end && poly.end_index() > block_start;
-            };
-
-            for (auto& block : blocks) {
-                const size_t block_end = block.starting_edge_idx + block.size;
-                uint64_t mask = MASK_PERMUTATION; // Always active
-
-                if (overlaps(polynomials.q_arith, block.starting_edge_idx, block_end))
-                    mask |= MASK_ARITHMETIC;
-                if (overlaps(polynomials.q_lookup, block.starting_edge_idx, block_end))
-                    mask |= MASK_LOOKUP;
-                if (overlaps(polynomials.q_delta_range, block.starting_edge_idx, block_end))
-                    mask |= MASK_DELTA_RANGE;
-                if (overlaps(polynomials.q_elliptic, block.starting_edge_idx, block_end))
-                    mask |= MASK_ELLIPTIC;
-                if (overlaps(polynomials.q_memory, block.starting_edge_idx, block_end))
-                    mask |= MASK_MEMORY;
-                if (overlaps(polynomials.q_nnf, block.starting_edge_idx, block_end))
-                    mask |= MASK_NNF;
-                if (overlaps(polynomials.q_poseidon2_external, block.starting_edge_idx, block_end))
-                    mask |= MASK_POSEIDON2_EXT;
-                if (overlaps(polynomials.q_poseidon2_internal, block.starting_edge_idx, block_end))
-                    mask |= MASK_POSEIDON2_INT;
-
-                // Also check lookup_read_counts/tags — LogDerivLookup has a table-side subrelation
-                // that activates even without q_lookup being set
-                if (overlaps(polynomials.lookup_read_counts, block.starting_edge_idx, block_end) ||
-                    overlaps(polynomials.lookup_read_tags, block.starting_edge_idx, block_end))
-                    mask |= MASK_LOOKUP;
-
-                block.poly_mask = mask;
-            }
-        }
-    }
-
-    /**
      * @brief Compute the number of unskippable rows we must iterate over
      * @details Some circuits have a circuit size much larger than the number of used rows (ECCVM, Translator).
      *          For relevant flavors, we have a `skip_entire_row` method that can be used to check whether to skip.
@@ -543,67 +520,6 @@ template <typename Flavor> class SumcheckProverRound {
 
         std::vector<BlockOfContiguousRows> result;
         constexpr bool can_skip_rows = (isRowSkippable<Flavor, decltype(polynomials), size_t>);
-
-        // For ZK flavors: detect the zero gap between trace data and mask data.
-        // Wire polynomials have non-zero data in [0, trace_end) and [dyadic_size - NUM_MASKED_ROWS, dyadic_size),
-        // while selectors/sigma/id are zero beyond trace_end via virtual extension. The gap between trace_end
-        // and the mask region is all-zero and can be skipped, saving ~46% of computation per round.
-        // NOTE: runtime `if` required — Apple clang 17 miscompiles `if constexpr` with Flavor::HasZK
-        // in template functions under -O3 -flto=thin, causing the gap-skipping optimization to be
-        // silently dropped. See matching workaround in sumcheck.hpp prove().
-        // Apply gap detection for ALL ZK flavors, even those with per-row skipping.
-        // Gap detection is O(num_polys) while per-row scanning is O(circuit_size).
-        // For flavors with skip_entire_row, the per-row scan would discover the same gap
-        // but at much higher cost (~2M row checks vs ~41 poly max() operations).
-        if (Flavor::HasZK) {
-            size_t trace_boundary = 0;
-
-            if constexpr (requires { polynomials.get_precomputed(); }) {
-                // Round 0: find where precomputed (selector/sigma/id) data ends
-                for (const auto& poly : polynomials.get_precomputed()) {
-                    trace_boundary = std::max(trace_boundary, poly.end_index());
-                }
-            } else {
-                // Subsequent rounds: detect trace boundary from bimodal end_index distribution.
-                // Precomputed polys have small end_index (trace region), witness polys have full round_size.
-                // The second-largest distinct end_index reveals the trace boundary.
-                auto all_polys = polynomials.get_all();
-                size_t max_end = 0;
-                size_t second_max_end = 0;
-                for (const auto& poly : all_polys) {
-                    size_t ei = poly.end_index();
-                    if (ei > max_end) {
-                        second_max_end = max_end;
-                        max_end = ei;
-                    } else if (ei > second_max_end && ei != max_end) {
-                        second_max_end = ei;
-                    }
-                }
-                constexpr size_t MIN_GAP = 2 * NUM_DISABLED_ROWS_IN_SUMCHECK;
-                if (second_max_end > 0 && max_end > second_max_end + MIN_GAP) {
-                    trace_boundary = second_max_end;
-                }
-            }
-
-            // The mask region covers the last NUM_DISABLED_ROWS_IN_SUMCHECK rows (4 = 3 mask + 1 for shifts).
-            // Use 2x margin for safety. The gap must be meaningful (> 8 rows) to bother splitting.
-            constexpr size_t MASK_MARGIN = 2 * NUM_DISABLED_ROWS_IN_SUMCHECK; // 8 rows
-            if (trace_boundary > 0 && trace_boundary + MASK_MARGIN < effective_round_size) {
-                // Round trace end up to even boundary (edge pairs are stride-2)
-                size_t trace_block_end = trace_boundary + (trace_boundary % 2);
-                // Mask block starts MASK_MARGIN rows before the end, rounded down to even
-                size_t mask_block_start = effective_round_size - MASK_MARGIN;
-                mask_block_start -= (mask_block_start % 2);
-
-                if (trace_block_end < mask_block_start) {
-                    result.push_back(
-                        BlockOfContiguousRows{ .starting_edge_idx = 0, .size = trace_block_end });
-                    result.push_back(BlockOfContiguousRows{ .starting_edge_idx = mask_block_start,
-                                                            .size = effective_round_size - mask_block_start });
-                    return result;
-                }
-            }
-        }
 
         if constexpr (can_skip_rows) {
             // Iterate over edge-pairs (stride-2) so each thread gets an even-aligned range
@@ -694,65 +610,79 @@ template <typename Flavor> class SumcheckProverRound {
 
         std::vector<BlockOfContiguousRows> round_manifest = compute_contiguous_round_size(polynomials);
 
-        // Compute per-block poly masks: determines which polys are actually needed per block
-        // based on active gate selectors. Saves 40-55% of DRAM loads in homogeneous blocks.
-        compute_block_poly_masks(round_manifest, polynomials);
+        // Precompute per-block polynomial masks to skip loading inactive polynomials.
+        // Only enabled for non-ZK flavors with selector polynomials (i.e. UltraFlavor, not AVM).
+        constexpr bool use_poly_masking =
+            !Flavor::HasZK &&
+            requires { compute_block_poly_mask(polynomials, static_cast<size_t>(0)); };
+
+        std::vector<uint64_t> block_masks;
+        std::vector<uint16_t> block_relation_masks;
+        if constexpr (use_poly_masking) {
+            block_masks.resize(round_manifest.size());
+            block_relation_masks.resize(round_manifest.size());
+            for (size_t b = 0; b < round_manifest.size(); ++b) {
+                block_masks[b] = compute_block_poly_mask(polynomials, round_manifest[b].starting_edge_idx);
+                block_relation_masks[b] = compute_block_relation_mask(polynomials, round_manifest[b].starting_edge_idx);
+            }
+        }
 
         // Construct univariate accumulator containers; one per thread
         // Note: std::vector will trigger {}-initialization of the contents. Therefore no need to zero the univariates.
         std::vector<SumcheckTupleOfTuplesOfUnivariates> thread_univariate_accumulators(get_num_cpus());
 
-        // Precompute the polynomial view once to avoid reconstructing RefArrays on every extend_edges call.
-        // This saves ~41 pointer copies per call × ~1M calls per round.
-        const auto poly_view = polynomials.get_all();
         parallel_for([&](ThreadChunk chunk) {
             // Construct extended univariates containers; one per thread
             ExtendedEdges extended_edges;
-            auto edge_view = extended_edges.get_all();
 
             // Process each block, dividing work within each block
-            for (const BlockOfContiguousRows& block : round_manifest) {
+            for (size_t block_idx = 0; block_idx < round_manifest.size(); ++block_idx) {
+                const BlockOfContiguousRows& block = round_manifest[block_idx];
                 size_t block_iterations = block.size / 2;
-                const uint64_t pmask = block.poly_mask;
 
                 // Get the range of iterations this thread should process for this block
                 auto iteration_range = chunk.range(block_iterations);
 
+                // Zero inactive edges once per block when masking is active
+                if constexpr (use_poly_masking) {
+                    if (!iteration_range.empty()) {
+                        zero_inactive_edges(extended_edges, block_masks[block_idx]);
+                    }
+                }
+
                 for (size_t i : iteration_range) {
                     size_t edge_idx = block.starting_edge_idx + (i * 2);
-
-                    // Use masked extend if not all polys needed; saves DRAM fetches
-                    if (pmask != ~uint64_t(0)) {
-                        extend_edges_masked(edge_view, poly_view, edge_idx, pmask);
+                    if constexpr (use_poly_masking) {
+                        extend_edges_masked(extended_edges, polynomials, edge_idx, block_masks[block_idx]);
                     } else {
-                        extend_edges(edge_view, poly_view, edge_idx);
+                        extend_edges(extended_edges, polynomials, edge_idx);
                     }
-
-                    // Software prefetch next edge's data across active polynomials only.
-                    // Hardware prefetcher can't track 41+ independent streams; issuing
-                    // explicit prefetches during relation accumulation hides DRAM latency.
-                    {
-                        size_t next_edge = edge_idx + 2;
-                        const size_t pn = poly_view.size();
-                        for (size_t pj = 0; pj < pn; ++pj) {
-                            if (!(pmask & (1ULL << pj))) {
-                                continue;
-                            }
-                            const auto& mv = poly_view[pj];
-                            if (next_edge < mv.end_index()) {
-                                __builtin_prefetch(&mv.at(next_edge), 0, 0);
-                            }
-                        }
-                    }
+                    // Compute the \f$ \ell \f$-th edge's univariate contribution,
+                    // scale it by the corresponding \f$ pow_{\beta} \f$ contribution and add it to the accumulators for
+                    // \f$
+                    // \tilde{S}^i(X_i) \f$. If \f$ \ell \f$'s binary representation is given by \f$ (\ell_{i+1},\ldots,
+                    // \ell_{d-1})\f$, the \f$ pow_{\beta}\f$-contribution is \f$\beta_{i+1}^{\ell_{i+1}} \cdot \ldots
+                    // \cdot
+                    // \beta_{d-1}^{\ell_{d-1}}\f$.
 
                     FF scaling_factor;
+                    // All subrelation in MultilinearBatchingFlavor are linearly dependent, i.e. they are not scaled by
+                    // `pow`-polynomial, hence we don't need to initialize `scaling_factor`.
                     if constexpr (!isMultilinearBatchingFlavor<Flavor>) {
                         scaling_factor = gate_separators[edge_idx];
                     }
-                    accumulate_relation_univariates(thread_univariate_accumulators[chunk.thread_index],
-                                                    extended_edges,
-                                                    relation_parameters,
-                                                    scaling_factor);
+                    if constexpr (use_poly_masking) {
+                        accumulate_relation_univariates_masked(thread_univariate_accumulators[chunk.thread_index],
+                                                               extended_edges,
+                                                               relation_parameters,
+                                                               scaling_factor,
+                                                               block_relation_masks[block_idx]);
+                    } else {
+                        accumulate_relation_univariates(thread_univariate_accumulators[chunk.thread_index],
+                                                        extended_edges,
+                                                        relation_parameters,
+                                                        scaling_factor);
+                    }
                 }
             }
         });
@@ -769,52 +699,6 @@ template <typename Flavor> class SumcheckProverRound {
 
         return round_univariate;
     };
-
-    /**
-     * @brief Accumulate edge contributions over a specific range [edge_start, edge_end) into the member accumulators.
-     * @details Used by chunked streaming sumcheck: called once per chunk, then finalize_univariate() batches
-     * the accumulated results across all chunks into the round univariate.
-     */
-    template <typename ProverPolynomialsOrPartiallyEvaluatedMultivariates>
-    void accumulate_edges(ProverPolynomialsOrPartiallyEvaluatedMultivariates& polynomials,
-                          const bb::RelationParameters<FF>& relation_parameters,
-                          const bb::GateSeparatorPolynomial<FF>& gate_separators,
-                          const SubrelationSeparators& /*alphas*/,
-                          size_t edge_start,
-                          size_t edge_end)
-    {
-        size_t num_pairs = (edge_end - edge_start) / 2;
-        std::vector<SumcheckTupleOfTuplesOfUnivariates> thread_accumulators(get_num_cpus());
-
-        parallel_for([&](ThreadChunk chunk) {
-            ExtendedEdges extended_edges;
-            auto range = chunk.range(num_pairs);
-            for (size_t i : range) {
-                size_t edge_idx = edge_start + (i * 2);
-                extend_edges(extended_edges, polynomials, edge_idx);
-                FF scaling_factor;
-                if constexpr (!isMultilinearBatchingFlavor<Flavor>) {
-                    scaling_factor = gate_separators[edge_idx];
-                }
-                accumulate_relation_univariates(
-                    thread_accumulators[chunk.thread_index], extended_edges, relation_parameters, scaling_factor);
-            }
-        });
-
-        for (auto& acc : thread_accumulators) {
-            Utils::add_nested_tuples(univariate_accumulators, acc);
-        }
-    }
-
-    /**
-     * @brief Batch the accumulated univariate contributions into a round univariate.
-     * @details Call after all accumulate_edges() calls for a round are complete.
-     */
-    SumcheckRoundUnivariate finalize_univariate(const SubrelationSeparators& alphas,
-                                                 const bb::GateSeparatorPolynomial<FF>& gate_separators)
-    {
-        return batch_over_relations<SumcheckRoundUnivariate>(univariate_accumulators, alphas, gate_separators);
-    }
 
     /*!
      * @brief For ZK Flavors: A method disabling the last 4 rows of the ProverPolynomials

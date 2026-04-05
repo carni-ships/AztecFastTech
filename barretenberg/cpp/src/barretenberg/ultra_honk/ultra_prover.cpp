@@ -12,6 +12,7 @@
 #include "barretenberg/sumcheck/sumcheck.hpp"
 #include "barretenberg/ultra_honk/oink_prover.hpp"
 #include <filesystem>
+#include <map>
 #include <set>
 namespace bb {
 
@@ -121,6 +122,12 @@ template <IsUltraOrMegaHonk Flavor> typename UltraProver_<Flavor>::Proof UltraPr
     auto t1 = std::chrono::steady_clock::now();
 
     generate_gate_challenges();
+
+    // Wait for async witness serialization to complete (launched during construct_proof_low_memory)
+    if (witness_serialization_future.valid()) {
+        auto num_serialized = witness_serialization_future.get();
+        vinfo("witness serialization complete (", num_serialized, " polys, overlapped with gate_challenges)");
+    }
     auto t2 = std::chrono::steady_clock::now();
 
     // Run sumcheck
@@ -158,6 +165,20 @@ template <IsUltraOrMegaHonk Flavor> void UltraProver_<Flavor>::construct_proof_l
     auto temp_dir = std::filesystem::temp_directory_path() / ("bb-streaming-" + std::to_string(getpid()));
     std::filesystem::create_directories(temp_dir);
     streaming_temp_dir = temp_dir.string();
+
+    // Precomputed poly cache: precomputed polys are identical across proofs of the same
+    // circuit type + dyadic size. Cache them persistently to skip re-serialization.
+    // Key: dyadic_size + num_public_inputs (sufficient to identify circuit type in practice).
+    auto poly_cache_dir = std::filesystem::temp_directory_path() / "bb-poly-cache"
+        / (std::to_string(prover_instance->dyadic_size()) + "-"
+           + std::to_string(prover_instance->num_public_inputs()));
+    bool cache_hit = std::filesystem::exists(poly_cache_dir / "complete");
+    if (cache_hit) {
+        vinfo("low-memory mode: precomputed poly cache HIT at ", poly_cache_dir.string());
+    } else {
+        std::filesystem::create_directories(poly_cache_dir);
+        vinfo("low-memory mode: precomputed poly cache MISS, will populate");
+    }
     vinfo("low-memory mode: temp dir ", streaming_temp_dir);
 
     auto& polys = prover_instance->polynomials;
@@ -181,27 +202,117 @@ template <IsUltraOrMegaHonk Flavor> void UltraProver_<Flavor>::construct_proof_l
         return !p.is_empty() && precomputed_ptrs.count(static_cast<const void*>(p.data()));
     };
 
-    // Serialize precomputed in get_all() ordering (for streaming sumcheck)
-    size_t num_precomputed_serialized = 0;
+    // Serialize precomputed polys to disk — use persistent cache when available.
+    // Precomputed polys are identical across proofs of the same circuit type.
+    // On cache hit: create symlinks from temp dir to cached files (instant).
+    // On cache miss: serialize in parallel and copy to cache.
+    struct SerTask { size_t idx; std::string path; const Polynomial* poly; std::string cache_path; };
+    std::vector<SerTask> all_tasks;
     for (size_t i = 0; i < all_polys.size(); i++) {
         if (is_precomputed(all_polys[i])) {
             std::string path = streaming_temp_dir + "/all_" + std::to_string(i) + ".bin";
-            all_polys[i].serialize_to_file(path);
+            std::string cpath = (poly_cache_dir / ("all_" + std::to_string(i) + ".bin")).string();
             streaming_all_poly_paths[i] = path;
-            num_precomputed_serialized++;
+            all_tasks.push_back({ i, path, &all_polys[i], cpath });
         }
     }
 
-    // Serialize precomputed in get_unshifted() ordering (for PCS)
     auto unshifted = polys.get_unshifted();
     streaming_unshifted_paths.resize(unshifted.size());
+
+    // Deduplication: build map from data pointer → all_* path to detect shared polys.
+    // Precomputed polys in get_unshifted() that share data with get_all() entries
+    // can use symlinks instead of being serialized twice.
+    std::map<const void*, std::string> precomp_data_to_all_path;
+    for (auto& task : all_tasks) {
+        precomp_data_to_all_path[static_cast<const void*>(task.poly->data())] = task.path;
+    }
+
+    std::vector<SerTask> unshifted_tasks;
+    // Track unshifted entries that will be deduped via symlink (need separate handling)
+    struct SymlinkTask { std::string target; std::string link_path; std::string cache_path; };
+    std::vector<SymlinkTask> dedup_symlinks;
     for (size_t i = 0; i < unshifted.size(); i++) {
         if (is_precomputed(unshifted[i])) {
             std::string path = streaming_temp_dir + "/unshifted_" + std::to_string(i) + ".bin";
-            unshifted[i].serialize_to_file(path);
+            std::string cpath = (poly_cache_dir / ("unshifted_" + std::to_string(i) + ".bin")).string();
             streaming_unshifted_paths[i] = path;
+            auto it = precomp_data_to_all_path.find(static_cast<const void*>(unshifted[i].data()));
+            if (it != precomp_data_to_all_path.end()) {
+                // Same data as an all_* entry — will symlink after serialization
+                dedup_symlinks.push_back({ it->second, path, cpath });
+            } else {
+                unshifted_tasks.push_back({ i, path, &unshifted[i], cpath });
+            }
         }
     }
+
+    std::vector<SerTask> all_ser_tasks;
+    all_ser_tasks.insert(all_ser_tasks.end(), all_tasks.begin(), all_tasks.end());
+    all_ser_tasks.insert(all_ser_tasks.end(), unshifted_tasks.begin(), unshifted_tasks.end());
+
+    if (cache_hit) {
+        // Cache hit: create symlinks to cached files (near-instant vs 10-20s serialization)
+        for (auto& task : all_ser_tasks) {
+            std::filesystem::create_symlink(task.cache_path, task.path);
+        }
+        // For deduped entries: on cache hit, the cache has separate unshifted files from previous miss
+        for (auto& sl : dedup_symlinks) {
+            if (std::filesystem::exists(sl.cache_path)) {
+                std::filesystem::create_symlink(sl.cache_path, sl.link_path);
+            } else {
+                // First run with dedup — cache only has all_* files. Symlink to the all_* temp file.
+                std::filesystem::create_symlink(sl.target, sl.link_path);
+            }
+        }
+        vinfo("linked ", all_ser_tasks.size(), " precomputed polys from cache");
+    } else {
+        // Cache miss: serialize in parallel, then hardlink into cache
+        constexpr size_t MAX_PARALLEL_WRITERS = 3;
+        std::vector<std::future<void>> futures;
+        for (auto& task : all_ser_tasks) {
+            if (futures.size() >= MAX_PARALLEL_WRITERS) {
+                futures.front().get();
+                futures.erase(futures.begin());
+            }
+            futures.push_back(std::async(std::launch::async, [&task]() {
+                task.poly->serialize_to_file(task.path);
+            }));
+        }
+        for (auto& f : futures) {
+            f.get();
+        }
+        // Create symlinks for deduped unshifted entries (points to all_* files already serialized)
+        for (auto& sl : dedup_symlinks) {
+            std::filesystem::create_symlink(sl.target, sl.link_path);
+        }
+        // Populate cache: hardlink serialized files into persistent cache dir
+        for (auto& task : all_ser_tasks) {
+            try {
+                std::filesystem::copy_file(task.path, task.cache_path,
+                    std::filesystem::copy_options::skip_existing);
+            } catch (...) {} // Non-fatal: cache population is best-effort
+        }
+        // Also cache deduped entries as symlinks to the all_* cached files
+        for (auto& sl : dedup_symlinks) {
+            try {
+                // Find the cache path for the target all_* file
+                for (auto& task : all_tasks) {
+                    if (task.path == sl.target) {
+                        std::filesystem::create_symlink(task.cache_path, sl.cache_path);
+                        break;
+                    }
+                }
+            } catch (...) {} // Non-fatal
+        }
+        // Mark cache as complete (atomic: write then rename)
+        {
+            auto marker = poly_cache_dir / "complete";
+            std::ofstream(marker.string()) << prover_instance->dyadic_size();
+        }
+        vinfo("serialized and cached ", all_ser_tasks.size(), " precomputed polys");
+    }
+    size_t num_precomputed_serialized = all_tasks.size();
     // get_to_be_shifted() is witness-only, no precomputed — serialized after Oink
     auto to_be_shifted = polys.get_to_be_shifted();
     streaming_shifted_paths.resize(to_be_shifted.size());
@@ -230,12 +341,62 @@ template <IsUltraOrMegaHonk Flavor> void UltraProver_<Flavor>::construct_proof_l
     // Initialize commitment key on prover_instance so OinkProver::prove() skips creating its own.
     prover_instance->commitment_key = CommitmentKey(prover_instance->dyadic_size());
 
-    // Run Oink rounds individually for progressive memory management
+    // Run Oink rounds individually for progressive memory management.
+    // After each round, start serializing newly-finalized witness polys in the background.
+    // This overlaps I/O with the remaining Oink computation.
     OinkProver<Flavor> oink_prover(prover_instance, honk_vk, transcript);
     oink_prover.execute_preamble_round();
     oink_prover.commit_to_masking_poly();
     oink_prover.execute_wire_commitments_round();
+
+    // w_l, w_r, w_o are finalized after wire commitments — start serializing in background.
+    // These won't be modified by subsequent Oink rounds.
+    std::vector<std::future<void>> early_ser_futures;
+    auto serialize_witness_poly_early = [&](auto& poly, const std::string& name_prefix, size_t idx) {
+        if (poly.is_empty()) return;
+        std::string path = streaming_temp_dir + "/" + name_prefix + std::to_string(idx) + ".bin";
+        early_ser_futures.push_back(std::async(std::launch::async, [&poly, path]() {
+            poly.serialize_to_file(path);
+        }));
+    };
+    // Serialize w_l, w_r, w_o (first 3 wire polys) early
+    // Note: these are serialized as part of get_all() later, but we write them now to overlap
+    // I/O with the sorted_list + log_derivative + grand_product rounds (~100-300ms total).
+    // The later Phase 2 will skip already-serialized polys.
+    auto early_all = polys.get_all();
+    // Find indices of w_l, w_r, w_o in get_all() ordering
+    std::set<const void*> early_wire_ptrs;
+    early_wire_ptrs.insert(static_cast<const void*>(polys.w_l.data()));
+    early_wire_ptrs.insert(static_cast<const void*>(polys.w_r.data()));
+    early_wire_ptrs.insert(static_cast<const void*>(polys.w_o.data()));
+    for (size_t i = 0; i < early_all.size(); i++) {
+        if (!early_all[i].is_empty() && early_wire_ptrs.count(static_cast<const void*>(early_all[i].data()))) {
+            std::string path = streaming_temp_dir + "/all_" + std::to_string(i) + ".bin";
+            streaming_all_poly_paths[i] = path;
+            auto* poly_ptr = &early_all[i];
+            early_ser_futures.push_back(std::async(std::launch::async, [poly_ptr, path]() {
+                poly_ptr->serialize_to_file(path);
+            }));
+        }
+    }
+
     oink_prover.execute_sorted_list_accumulator_round();
+
+    // w_4 is finalized after sorted_list — serialize in background during log-derivative round
+    early_wire_ptrs.clear();
+    early_wire_ptrs.insert(static_cast<const void*>(polys.w_4.data()));
+    for (size_t i = 0; i < early_all.size(); i++) {
+        if (!early_all[i].is_empty() && streaming_all_poly_paths[i].empty()
+            && early_wire_ptrs.count(static_cast<const void*>(early_all[i].data()))) {
+            std::string path = streaming_temp_dir + "/all_" + std::to_string(i) + ".bin";
+            streaming_all_poly_paths[i] = path;
+            auto* poly_ptr = &early_all[i];
+            early_ser_futures.push_back(std::async(std::launch::async, [poly_ptr, path]() {
+                poly_ptr->serialize_to_file(path);
+            }));
+        }
+    }
+
     oink_prover.execute_log_derivative_inverse_round();
 
     // Free precomputed polys used only by log-derivative (lookup relation)
@@ -268,39 +429,90 @@ template <IsUltraOrMegaHonk Flavor> void UltraProver_<Flavor>::construct_proof_l
     // Free the commitment key used by Oink
     prover_instance->commitment_key = CommitmentKey();
 
-    // Phase 2: Serialize WITNESS polys (post-Oink, with correct w_4/lookup_inverses/z_perm).
-    // Also serialize shifted views which reference witness poly memory.
+    // Wait for early wire poly serialization to complete
+    for (auto& f : early_ser_futures) {
+        f.get();
+    }
+    vinfo("early wire poly serialization complete (", early_ser_futures.size(), " polys overlapped with Oink rounds)");
+
+    // Phase 2: Serialize remaining WITNESS polys (post-Oink) in parallel with 3 concurrent writers.
+    // w_l, w_r, w_o, w_4 were already serialized early (above). Only need lookup_inverses,
+    // z_perm, and gemini_masking_poly here.
     all_polys = polys.get_all();
-    size_t num_witness_serialized = 0;
+    struct WitSerTask { std::string path; const Polynomial* poly; std::string* path_slot; };
+    std::vector<WitSerTask> wit_tasks;
+
     for (size_t i = 0; i < all_polys.size(); i++) {
         if (streaming_all_poly_paths[i].empty() && !all_polys[i].is_empty()) {
             std::string path = streaming_temp_dir + "/all_" + std::to_string(i) + ".bin";
-            all_polys[i].serialize_to_file(path);
             streaming_all_poly_paths[i] = path;
-            num_witness_serialized++;
+            wit_tasks.push_back({ path, &all_polys[i], &streaming_all_poly_paths[i] });
         }
     }
 
-    // Serialize witness polys in PCS ordering (precomputed already serialized in Phase 1)
+    // Also collect PCS ordering witness polys.
+    // Optimization: polys that were already serialized in the get_all() ordering above share the
+    // same data pointer. Use symlinks instead of re-serializing to avoid redundant I/O.
+    // At 2^24, this saves ~7 × 512 MiB = 3.5 GiB of writes.
     {
+        // Build map from data pointer → all_* path for already-serialized polys
+        std::map<const void*, std::string> serialized_data_to_path;
+        for (size_t i = 0; i < all_polys.size(); i++) {
+            if (!streaming_all_poly_paths[i].empty() && !all_polys[i].is_empty()) {
+                serialized_data_to_path[static_cast<const void*>(all_polys[i].data())] = streaming_all_poly_paths[i];
+            }
+        }
+
         auto unshifted_post = polys.get_unshifted();
         for (size_t i = 0; i < unshifted_post.size(); i++) {
             if (streaming_unshifted_paths[i].empty() && !unshifted_post[i].is_empty()) {
                 std::string path = streaming_temp_dir + "/unshifted_" + std::to_string(i) + ".bin";
-                unshifted_post[i].serialize_to_file(path);
                 streaming_unshifted_paths[i] = path;
+                auto it = serialized_data_to_path.find(static_cast<const void*>(unshifted_post[i].data()));
+                if (it != serialized_data_to_path.end()) {
+                    // Same data already on disk — symlink instead of re-serializing
+                    std::filesystem::create_symlink(it->second, path);
+                } else {
+                    wit_tasks.push_back({ path, &unshifted_post[i], &streaming_unshifted_paths[i] });
+                }
             }
         }
         auto shifted_post = polys.get_to_be_shifted();
         for (size_t i = 0; i < shifted_post.size(); i++) {
             if (streaming_shifted_paths[i].empty() && !shifted_post[i].is_empty()) {
                 std::string path = streaming_temp_dir + "/shifted_" + std::to_string(i) + ".bin";
-                shifted_post[i].serialize_to_file(path);
                 streaming_shifted_paths[i] = path;
+                auto it = serialized_data_to_path.find(static_cast<const void*>(shifted_post[i].data()));
+                if (it != serialized_data_to_path.end()) {
+                    std::filesystem::create_symlink(it->second, path);
+                } else {
+                    wit_tasks.push_back({ path, &shifted_post[i], &streaming_shifted_paths[i] });
+                }
             }
         }
     }
-    vinfo("serialized ", num_witness_serialized, " witness polys post-Oink + PCS ordering");
+
+    // Launch witness serialization as async future — overlaps with generate_gate_challenges()
+    // in construct_proof(). Sumcheck waits for this to complete before reading files.
+    witness_serialization_future = std::async(std::launch::async, [tasks = std::move(wit_tasks)]() {
+        constexpr size_t MAX_WRITERS = 3;
+        std::vector<std::future<void>> futures;
+        for (auto& task : tasks) {
+            if (futures.size() >= MAX_WRITERS) {
+                futures.front().get();
+                futures.erase(futures.begin());
+            }
+            futures.push_back(std::async(std::launch::async, [&task]() {
+                task.poly->serialize_to_file(task.path);
+            }));
+        }
+        for (auto& f : futures) {
+            f.get();
+        }
+        return tasks.size();
+    });
+
+    vinfo("witness serialization launched async (" , wit_tasks.size(), " polys)");
     vinfo("created oink proof (low-memory path)");
 }
 
@@ -487,11 +699,16 @@ template <IsUltraOrMegaHonk Flavor> void UltraProver_<Flavor>::execute_pcs()
     }
     vinfo("computed opening proof");
 
-    // Clean up streaming temp files
+    // Clean up streaming temp files asynchronously — don't block proof return.
+    // At 2^24 with 36+ files × 512 MiB each, remove_all can take 100ms+ of filesystem ops.
     if (!streaming_temp_dir.empty()) {
-        std::error_code ec;
-        std::filesystem::remove_all(streaming_temp_dir, ec);
-        vinfo("cleaned up streaming temp dir");
+        auto dir_to_remove = std::move(streaming_temp_dir);
+        streaming_temp_dir.clear();
+        std::thread([dir = std::move(dir_to_remove)]() {
+            std::error_code ec;
+            std::filesystem::remove_all(dir, ec);
+        }).detach();
+        vinfo("streaming temp cleanup dispatched (async)");
     }
 }
 

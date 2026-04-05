@@ -14,9 +14,10 @@ export type { VerifierTarget } from "./engine.js";
 
 // Worker pool
 export { PersistentBb } from "./persistent-bb.js";
+export type { PrefetchedWitness } from "./persistent-bb.js";
 
 // Watch loops
-export { watchSequential, watchPipelined, watchParallelMsgpack } from "./watcher.js";
+export { watchSequential, watchPipelined, watchParallelMsgpack, watchSequentialPrefetch } from "./watcher.js";
 
 // Witness utilities
 export { setMaxMutations, getMaxMutations } from "./witness.js";

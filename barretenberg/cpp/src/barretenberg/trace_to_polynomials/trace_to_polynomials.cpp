@@ -65,26 +65,49 @@ std::vector<CyclicPermutation> TraceToPolynomials<Flavor>::populate_wires_and_se
 
             constexpr uint32_t PARALLEL_THRESHOLD = 1 << 14; // 16K rows
             if (block_size >= PARALLEL_THRESHOLD) {
-                // Large block: parallelize wire population, then build copy cycles sequentially.
-                // Process one wire at a time per chunk for better sequential read/write locality:
-                // block.wires[wire_idx] and wires[wire_idx] are each accessed sequentially.
-                parallel_for_range(static_cast<size_t>(block_size), [&](size_t start, size_t end) {
-                    for (uint32_t wire_idx = 0; wire_idx < NUM_WIRES; ++wire_idx) {
-                        for (size_t block_row_idx = start; block_row_idx < end; ++block_row_idx) {
-                            uint32_t var_idx = block.wires[wire_idx][block_row_idx];
-                            uint32_t trace_row_idx = static_cast<uint32_t>(block_row_idx) + offset;
-                            wires[wire_idx].at(trace_row_idx) = builder.get_variable(var_idx);
-                        }
-                    }
-                });
+                // Large block: fused chunked pass.
+                // Process in chunks to bound memory: each chunk parallelizes wire writes
+                // AND accumulates copy cycle entries into thread-local flat buffers.
+                // Merging flat buffers is faster than the old approach of re-reading
+                // block.wires in a second sequential pass (eliminates redundant reads).
+                struct CycleEntry {
+                    uint32_t real_var_idx;
+                    uint32_t wire_idx;
+                    uint32_t trace_row_idx;
+                };
 
-                // Copy cycles: sequential (shared variable-indexed vectors)
-                for (uint32_t block_row_idx = 0; block_row_idx < block_size; ++block_row_idx) {
-                    uint32_t trace_row_idx = block_row_idx + offset;
-                    for (uint32_t wire_idx = 0; wire_idx < NUM_WIRES; ++wire_idx) {
-                        uint32_t var_idx = block.wires[wire_idx][block_row_idx];
-                        uint32_t real_var_idx = builder.real_variable_index.at(var_idx);
-                        copy_cycles[real_var_idx].emplace_back(cycle_node{ wire_idx, trace_row_idx });
+                constexpr uint32_t CHUNK_SIZE = 1 << 16; // 64K rows per chunk (~3 MB buffer)
+                for (uint32_t chunk_start = 0; chunk_start < block_size; chunk_start += CHUNK_SIZE) {
+                    uint32_t chunk_end = std::min(chunk_start + CHUNK_SIZE, block_size);
+                    uint32_t chunk_rows = chunk_end - chunk_start;
+
+                    // Parallel: write wires + accumulate copy cycle entries per thread
+                    auto per_thread_entries = parallel_for_heuristic(
+                        static_cast<size_t>(chunk_rows),
+                        std::vector<CycleEntry>{},
+                        [&](size_t local_row, std::vector<CycleEntry>& local_buf) {
+                            uint32_t block_row_idx = chunk_start + static_cast<uint32_t>(local_row);
+                            uint32_t trace_row_idx = block_row_idx + offset;
+                            for (uint32_t wire_idx = 0; wire_idx < NUM_WIRES; ++wire_idx) {
+                                uint32_t var_idx = block.wires[wire_idx][block_row_idx];
+                                wires[wire_idx].at(trace_row_idx) = builder.get_variable(var_idx);
+                                uint32_t real_var_idx = builder.real_variable_index.at(var_idx);
+                                local_buf.push_back({ real_var_idx, wire_idx, trace_row_idx });
+                            }
+                        },
+                        thread_heuristics::FF_COPY_COST * NUM_WIRES * 4);
+
+                    // Sequential merge: flat buffer reads are sequential (cache-friendly),
+                    // only the copy_cycles writes are random access.
+                    for (auto& thread_buf : per_thread_entries) {
+                        for (size_t j = 0; j < thread_buf.size(); ++j) {
+                            // Prefetch next entry's target vector to hide cache miss latency
+                            if (j + 4 < thread_buf.size()) {
+                                __builtin_prefetch(&copy_cycles[thread_buf[j + 4].real_var_idx], 1, 1);
+                            }
+                            auto& e = thread_buf[j];
+                            copy_cycles[e.real_var_idx].emplace_back(cycle_node{ e.wire_idx, e.trace_row_idx });
+                        }
                     }
                 }
             } else {

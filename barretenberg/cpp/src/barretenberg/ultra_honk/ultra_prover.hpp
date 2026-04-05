@@ -13,6 +13,7 @@
 #include "barretenberg/sumcheck/sumcheck_output.hpp"
 #include "barretenberg/transcript/transcript.hpp"
 #include "barretenberg/ultra_honk/prover_instance.hpp"
+#include <future>
 
 namespace bb {
 
@@ -52,6 +53,10 @@ template <IsUltraOrMegaHonk Flavor_> class UltraProver_ {
     std::vector<std::string> streaming_unshifted_paths;
     std::vector<std::string> streaming_shifted_paths;
     std::vector<std::string> streaming_all_poly_paths;
+
+    // Async witness serialization: launched during construct_proof_low_memory(),
+    // completed before execute_sumcheck_iop(). Overlaps with generate_gate_challenges().
+    std::future<size_t> witness_serialization_future;
 
     CommitmentKey commitment_key;
 

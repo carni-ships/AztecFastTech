@@ -1,0 +1,54 @@
+Witness Prefetch Pipeline (inter-proof pipelining)
+===================================================
+
+Overlaps proof input fetching for the NEXT proof with the current proof's
+execution. While a proof is running, the agent peeks at the broker's priority
+queue and pre-fetches/deserializes the next job's inputs.
+
+Components:
+  1. ProvingBroker.peekNextProvingJob() - non-claiming queue lookahead
+  2. ProvingAgent heartbeat prefetch - speculative input pre-fetch during polling
+  3. ProvingAgent.startJob() cache check - uses prefetched inputs on hit
+
+Apply:   node patches/apply_witness_prefetch.js
+Revert:  node patches/apply_witness_prefetch.js --revert
+Enable:  export PROVER_WITNESS_PREFETCH=1
+
+Savings (with InlineProofStore):
+  - Per proof: ~10-50ms (JSON parse overlap)
+  - Per epoch: ~1-5s total across all proofs
+
+Note: With InlineProofStore (default), the input fetching is cheap (data URI
+parse). The bigger Setup cost is ACVM witness generation (~500-900ms), which
+runs as a subprocess and could theoretically be overlapped too. However, that
+requires deeper changes to BBNativeRollupProver and is left as a future
+enhancement. See analysis below.
+
+ACVM Witness Prefetch Analysis (not implemented)
+-------------------------------------------------
+The dominant between-proof cost is ACVM witness generation, not input fetching.
+To overlap ACVM with the current proof's PCS:
+
+  Pros:
+  - ACVM is single-threaded; uses one E-core while bb PCS uses 4+ P-cores
+  - Could save ~500-800ms per proof transition
+  - With 10-15 proofs on critical path: ~5-9s off epoch time
+
+  Cons:
+  - Requires adding prefetchWitness() to BBNativeRollupProver
+  - Must replicate the ProvingRequestType -> circuitType -> convertInput mapping
+  - ACVM needs a working directory and produces a .gz file (lifecycle management)
+  - Memory: extra ~100-200MB for the prefetched witness
+  - Misprediction waste: if peeked job != assigned job, ACVM run is discarded
+  - Risk: complex change touching the proving hot path
+
+  Hit rate estimate: ~85-95% in steady-state (deterministic priority queue,
+  proofs complete in roughly the same order they're assigned). Lower during
+  dependency cascade transitions (base -> merge -> checkpoint).
+
+  Implementation sketch:
+  - BBNativeRollupProver._getArtifactMapping(type) maps ProvingRequestType
+    enum values to { artifactName, convertInput, convertOutput }
+  - prefetchWitness(jobInputs) runs ACVM in a temp dir, copies .gz to stable path
+  - generateProofWithBB checks _witnessPrefetchCache before running ACVM
+  - Agent calls circuitProver.prefetchWitness() during heartbeat if peek succeeds

@@ -11,7 +11,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { resolve, join } from "path";
 import { execSync } from "child_process";
 import { ProverEngine, extractInnerProof } from "./engine.js";
-import { watchSequential, watchPipelined, watchParallelMsgpack } from "./watcher.js";
+import { watchSequential, watchPipelined, watchParallelMsgpack, watchSequentialPrefetch } from "./watcher.js";
 import type { DataSource, WitnessBuilder, ProofSink, ProofOutput } from "./types.js";
 
 // --- CLI Helpers ---
@@ -221,8 +221,14 @@ async function cmdWatch() {
         workers: parseInt(getArg("workers", "6")),
       });
       break;
+    case "prefetch":
+      await watchSequentialPrefetch(engine, dataSource, witnessBuilder, proofSink, {
+        ...opts,
+        threads: parseInt(getArg("threads", "4")),
+      });
+      break;
     default:
-      throw new Error(`Unknown watch mode: ${mode}. Available: sequential, pipelined, parallel`);
+      throw new Error(`Unknown watch mode: ${mode}. Available: sequential, pipelined, parallel, prefetch`);
   }
 }
 
@@ -387,7 +393,7 @@ Options:
   --node <url>        Node URL for data source
   --native            Use native bb CLI instead of WASM (faster)
   --recursive         Enable recursive IVC proof chaining
-  --mode <mode>       Watch mode: sequential, pipelined, parallel
+  --mode <mode>       Watch mode: sequential, pipelined, parallel, prefetch
   --workers <n>       Number of parallel workers (default: 6)
   --interval <n>      Poll interval in seconds (default: 10)
   --threads <n>       WASM threads (default: 8)

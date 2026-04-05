@@ -218,21 +218,43 @@ Run a prover node against Aztec testnet using the optimized bb-avm binary.
 # Dry run (print config without starting)
 ./scripts/start-prover.sh --dry-run
 
-# Start prover node + broker + 2 agents
+# Start prover node + broker (auto-detects 2×6 or 3×4 based on RAM)
 ./scripts/start-prover.sh
+
+# Override agent/thread config
+PROVER_AGENTS=3 PROVER_THREADS=4 ./scripts/start-prover.sh
 ```
 
-The script launches a broker on port 8079 and a prover node with 2 parallel agents (6 threads each) on port 8180. The dual-agent configuration enables critical-path parallelism: merge tree jobs can run while leaf proofs are still in flight.
+The script launches a broker on port 8079 and a prover node on port 8180. Agent configuration is auto-detected based on available RAM:
+
+| RAM | Config | Epoch Time | Notes |
+|-----|--------|-----------|-------|
+| 18 GiB | 2 agents × 6 threads | ~19 min | Safe default |
+| ≥24 GiB | 3 agents × 4 threads | ~13 min | Deeper merge-tree parallelism |
 
 ### Architecture
 
 ```
 Broker (port 8079) ←── Prover Node (port 8180)
-                           ├── Agent 1 (6 threads)
-                           └── Agent 2 (6 threads)
+                           ├── Agent 1 (N threads)
+                           ├── Agent 2 (N threads)
+                           └── Agent 3 (N threads)  [if ≥24 GiB RAM]
 ```
 
-Each epoch requires ~98 proving jobs across circuit types (PUBLIC_TX_BASE_ROLLUP, BLOCK_ROOT_EMPTY_TX, PARITY_BASE, CHECKPOINT_ROOT, CHECKPOINT_MERGE, ROOT_ROLLUP). With 2 agents, epochs complete in ~19 minutes.
+Each epoch requires ~98 proving jobs across circuit types (PUBLIC_TX_BASE_ROLLUP, BLOCK_ROOT_EMPTY_TX, PARITY_BASE, CHECKPOINT_ROOT, CHECKPOINT_MERGE, ROOT_ROLLUP). With 3 agents, merge tree jobs run while leaf proofs are still in flight, cutting epoch time by ~30%.
+
+### Epoch Proving DAG (Critical Path)
+
+```
+Leaf proofs (BASE_ROLLUP × ~32)  ──┐
+                                    ├── Block merges (BLOCK_MERGE × ~16)
+Parity proofs (PARITY_BASE × ~16) ─┤
+                                    ├── Checkpoint merges (CHECKPOINT_MERGE × ~8)
+                                    ├── Checkpoint root (CHECKPOINT_ROOT × 1)
+                                    └── Root rollup (ROOT_ROLLUP × 1, 306s, 13M gates)
+```
+
+The **root rollup is always the critical path** — it takes ~5 min alone. All other proofs complete in <30s each. The optimal strategy is to finish all root rollup dependencies ASAP so the single long root rollup job starts as early as possible.
 
 ### First Successful Epoch
 
