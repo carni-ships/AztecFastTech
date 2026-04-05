@@ -16,6 +16,7 @@ import { getAztecEthPrice, quoteProfitability, formatQuote } from './price.js';
 import { submitClaimBundle } from './bundle.js';
 import { runClaimDaemon, defaultConfig } from './claim-daemon.js';
 import { getAllProverProfiles, getCurrentEpochInfo, printCompetitiveAnalysis } from './competitive.js';
+import { runOrchestrator } from './orchestrator.js';
 import { parseEther, formatEther } from 'viem';
 
 const USAGE = `
@@ -29,6 +30,7 @@ Commands:
   daemon [--dry-run]      Run continuous claim daemon
   monitor                 Run continuous monitoring loop (balance, timelock, health)
   competitors             Analyze competing provers' submission timing and estimate next submissions
+  orchestrate             Run full proving orchestrator (watcher + watchdog + abort logic)
 
 Environment variables:
   PROVER_PRIVATE_KEY      Prover wallet private key (0x-prefixed)
@@ -41,6 +43,10 @@ Environment variables:
   SLIPPAGE_BPS            Swap slippage in bps (default: ${DEFAULTS.slippageBps})
   CLAIM_INTERVAL_MS       Claim check interval (default: ${DEFAULTS.claimCheckIntervalMs})
   MONITOR_INTERVAL_MS     Monitor poll interval (default: ${DEFAULTS.monitorIntervalMs})
+  PROVER_LOG_FILE         Prover log path (default: .prover-data-mainnet/prover.log)
+  PROVER_START_SCRIPT     Prover start script (default: ./scripts/start-prover-mainnet.sh)
+  PROVER_DATA_DIR         Prover data directory (default: .prover-data-mainnet)
+  INITIAL_SCORE           Starting activity score estimate (default: 0)
 `;
 
 function requireEnv(name: string): string {
@@ -142,6 +148,20 @@ async function main() {
     case 'monitor': {
       const intervalMs = parseInt(process.env.MONITOR_INTERVAL_MS ?? String(DEFAULTS.monitorIntervalMs));
       await runMonitor(getAddress(), intervalMs);
+      break;
+    }
+
+    case 'orchestrate': {
+      const noWatchdog = flags.includes('--no-watchdog');
+      await runOrchestrator({
+        proverAddress: getAddress(),
+        logFile: process.env.PROVER_LOG_FILE,
+        startScript: process.env.PROVER_START_SCRIPT,
+        startArgs: flags.filter(f => f !== '--no-watchdog'),
+        dataDir: process.env.PROVER_DATA_DIR,
+        initialScore: parseInt(process.env.INITIAL_SCORE ?? '0'),
+        noWatchdog,
+      });
       break;
     }
 
