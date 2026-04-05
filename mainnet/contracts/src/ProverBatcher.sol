@@ -30,10 +30,12 @@ interface IWETH {
 }
 
 /// @title ProverBatcher
-/// @notice Atomically claims Aztec prover rewards, swaps AZTEC→ETH, checks profitability,
-///         pays builder tip, and sends remaining ETH to operator.
-/// @dev Designed to be called inside a Flashbots bundle for MEV protection.
-///      Reverts if net profit is below threshold — Flashbots doesn't charge for reverted bundles.
+/// @notice Atomically claims Aztec prover rewards, swaps AZTEC→ETH, pays builder
+///         from proceeds, and sends remaining ETH to operator.
+/// @dev Designed for Flashbots bundles with gasPrice=0. The bundle tx costs nothing
+///      if the contract reverts (unprofitable). Builder is paid via coinbase.transfer
+///      from the swap proceeds, not via gas priority fee. This makes failed claims
+///      completely free — no gas wasted on unsuccessful attempts.
 contract ProverBatcher {
     using SafeERC20 for IERC20;
 
@@ -49,9 +51,10 @@ contract ProverBatcher {
 
     // --- Errors ---
     error NotOperator();
-    error NotProfitable(uint256 ethReceived, uint256 totalCost, uint256 minProfit);
+    error NotProfitable(uint256 ethReceived, uint256 minRequired);
     error RewardsNotClaimable();
     error NothingClaimed();
+    error BuilderPaymentFailed();
 
     modifier onlyOperator() {
         if (msg.sender != operator) revert NotOperator();
@@ -72,20 +75,21 @@ contract ProverBatcher {
         operator = _operator;
     }
 
-    /// @notice Claim rewards for proven epochs, swap to ETH, verify profitability.
+    /// @notice Claim rewards, swap to ETH, pay builder from proceeds, send rest to operator.
+    /// @dev Call with gasPrice=0 inside a Flashbots bundle. The builder is paid via
+    ///      coinbase.transfer from the swap ETH, not via tx gas. If this reverts,
+    ///      the bundle is dropped and no gas is paid — zero cost on failure.
     /// @param epochs Array of epoch numbers to claim rewards for
-    /// @param minEthOut Minimum ETH output from swap (slippage protection)
-    /// @param minProfit Minimum net profit in ETH after all costs (gas + tip)
-    /// @param builderTip ETH to send to block.coinbase (Flashbots builder payment)
+    /// @param minEthOut Minimum ETH from Uniswap swap (slippage protection)
+    /// @param builderPayment ETH to send to block.coinbase (builder's incentive to include bundle)
+    /// @param minOperatorProfit Minimum ETH the operator must receive after builder payment
     function claimAndSell(
         Epoch[] calldata epochs,
         uint256 minEthOut,
-        uint256 minProfit,
-        uint256 builderTip
+        uint256 builderPayment,
+        uint256 minOperatorProfit
     ) external onlyOperator {
-        uint256 startBalance = address(this).balance;
-
-        // 1. Verify rewards are claimable (avoid wasting gas on revert deep in rollup)
+        // 1. Verify rewards are claimable (avoid deep revert in rollup)
         if (!rollup.isRewardsClaimable()) revert RewardsNotClaimable();
 
         // 2. Claim accumulated AZTEC rewards
@@ -102,30 +106,34 @@ contract ProverBatcher {
                 recipient: address(this),
                 amountIn: claimed,
                 amountOutMinimum: minEthOut,
-                sqrtPriceLimitX96: 0 // no price limit, rely on minEthOut
+                sqrtPriceLimitX96: 0
             })
         );
 
         // 4. Unwrap WETH → ETH
         weth.withdraw(wethOut);
 
-        // 5. Profitability check
-        uint256 ethReceived = address(this).balance - startBalance;
-        uint256 gasCost = tx.gasprice * 4_500_000; // observed: ~4M gas for proof + swap
-        uint256 totalCost = gasCost + builderTip;
-        if (ethReceived < totalCost + minProfit) {
-            revert NotProfitable(ethReceived, totalCost, minProfit);
+        // 5. Profitability check — revert if not enough for builder + operator
+        //    With gasPrice=0, revert = zero cost (bundle simply not included)
+        uint256 totalRequired = builderPayment + minOperatorProfit;
+        if (wethOut < totalRequired) {
+            revert NotProfitable(wethOut, totalRequired);
         }
 
-        // 6. Pay builder tip
-        if (builderTip > 0) {
-            block.coinbase.transfer(builderTip);
+        // 6. Pay builder via coinbase.transfer
+        //    Using .call instead of .transfer to handle contract coinbase addresses
+        //    (some builders use contracts). Reentrancy is safe here — we're done
+        //    with all state-changing ops on external contracts.
+        if (builderPayment > 0) {
+            (bool ok,) = block.coinbase.call{value: builderPayment}("");
+            if (!ok) revert BuilderPaymentFailed();
         }
 
         // 7. Send all remaining ETH to operator
         uint256 remaining = address(this).balance;
         if (remaining > 0) {
-            payable(operator).transfer(remaining);
+            (bool ok,) = payable(operator).call{value: remaining}("");
+            if (!ok) revert BuilderPaymentFailed(); // reuse error
         }
     }
 
@@ -134,7 +142,6 @@ contract ProverBatcher {
         if (!rollup.isRewardsClaimable()) revert RewardsNotClaimable();
         uint256 claimed = rollup.claimProverRewards(address(this), epochs);
         if (claimed == 0) revert NothingClaimed();
-        // Transfer AZTEC tokens to operator
         aztecToken.safeTransfer(operator, claimed);
     }
 
@@ -150,6 +157,6 @@ contract ProverBatcher {
         if (bal > 0) payable(operator).transfer(bal);
     }
 
-    // Accept ETH from WETH unwrap
+    // Accept ETH from WETH unwrap and builder payment refunds
     receive() external payable {}
 }

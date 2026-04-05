@@ -70,8 +70,8 @@ export const proverBatcherAbi = [
     inputs: [
       { name: 'epochs', type: 'uint256[]' },
       { name: 'minEthOut', type: 'uint256' },
-      { name: 'minProfit', type: 'uint256' },
-      { name: 'builderTip', type: 'uint256' },
+      { name: 'builderPayment', type: 'uint256' },
+      { name: 'minOperatorProfit', type: 'uint256' },
     ],
     outputs: [],
   },
@@ -95,8 +95,7 @@ export const proverBatcherAbi = [
     type: 'error',
     inputs: [
       { name: 'ethReceived', type: 'uint256' },
-      { name: 'totalCost', type: 'uint256' },
-      { name: 'minProfit', type: 'uint256' },
+      { name: 'minRequired', type: 'uint256' },
     ],
   },
   {

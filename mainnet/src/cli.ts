@@ -35,7 +35,7 @@ Environment variables:
   MIN_PROFIT_ETH          Minimum profit threshold (default: ${DEFAULTS.minProfitEth})
   MIN_EPOCH_BATCH         Minimum epochs to batch (default: ${DEFAULTS.minEpochBatch})
   MAX_EPOCH_BATCH         Maximum epochs per claim (default: ${DEFAULTS.maxEpochBatch})
-  BUILDER_TIP_ETH         Flashbots builder tip (default: ${DEFAULTS.builderTipEth})
+  BUILDER_PAYMENT_ETH         Flashbots builder tip (default: ${DEFAULTS.builderPaymentEth})
   SLIPPAGE_BPS            Swap slippage in bps (default: ${DEFAULTS.slippageBps})
   CLAIM_INTERVAL_MS       Claim check interval (default: ${DEFAULTS.claimCheckIntervalMs})
   MONITOR_INTERVAL_MS     Monitor poll interval (default: ${DEFAULTS.monitorIntervalMs})
@@ -65,7 +65,7 @@ function getBatcherAddress(): `0x${string}` {
 function getOverrides() {
   return {
     minProfitEth: parseFloat(process.env.MIN_PROFIT_ETH ?? String(DEFAULTS.minProfitEth)),
-    builderTipEth: parseFloat(process.env.BUILDER_TIP_ETH ?? String(DEFAULTS.builderTipEth)),
+    builderPaymentEth: parseFloat(process.env.BUILDER_PAYMENT_ETH ?? String(DEFAULTS.builderPaymentEth)),
     slippageBps: parseInt(process.env.SLIPPAGE_BPS ?? String(DEFAULTS.slippageBps)),
   };
 }

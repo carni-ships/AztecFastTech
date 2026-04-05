@@ -36,9 +36,8 @@ export interface PriceQuote {
   ethPerAztec: number;         // ETH per 1 AZTEC token
   aztecAmountRaw: bigint;      // Total AZTEC to sell (in wei)
   estimatedEthOut: bigint;     // Expected ETH output after swap fee
-  gasCostEth: bigint;          // Estimated gas cost in ETH
-  builderTip: bigint;          // Builder tip in ETH
-  totalCost: bigint;           // gasCostEth + builderTip
+  builderPayment: bigint;      // ETH paid to builder via coinbase.transfer
+  totalCost: bigint;           // builderPayment only (gasPrice=0, no gas cost)
   netProfit: bigint;           // estimatedEthOut - totalCost
   profitable: boolean;         // netProfit >= minProfit
   minEthOut: bigint;           // Slippage-adjusted minimum (for tx param)
@@ -75,18 +74,15 @@ export async function quoteProfitability(
   aztecAmount: bigint,
   overrides?: {
     minProfitEth?: number;
-    builderTipEth?: number;
+    builderPaymentEth?: number;
     slippageBps?: number;
   },
 ): Promise<PriceQuote> {
   const minProfitWei = parseEther(String(overrides?.minProfitEth ?? DEFAULTS.minProfitEth));
-  const builderTip = parseEther(String(overrides?.builderTipEth ?? DEFAULTS.builderTipEth));
+  const builderPayment = parseEther(String(overrides?.builderPaymentEth ?? DEFAULTS.builderPaymentEth));
   const slippageBps = overrides?.slippageBps ?? DEFAULTS.slippageBps;
 
-  const [ethPerAztec, gasPrice] = await Promise.all([
-    getAztecEthPrice(),
-    getGasPrice(),
-  ]);
+  const ethPerAztec = await getAztecEthPrice();
 
   // Estimated ETH output: aztecAmount * ethPerAztec * (1 - swapFee)
   // Swap fee is 0.05% = 5 bps
@@ -97,9 +93,9 @@ export async function quoteProfitability(
   // Minimum ETH out with slippage
   const minEthOut = estimatedEthOut * (10000n - BigInt(slippageBps)) / 10000n;
 
-  // Gas cost
-  const gasCostEth = gasPrice * DEFAULTS.gasEstimate;
-  const totalCost = gasCostEth + builderTip;
+  // With gasPrice=0, the only cost is the builder payment (coinbase.transfer).
+  // Gas is free — if the tx reverts, the bundle is dropped with zero cost.
+  const totalCost = builderPayment;
 
   const netProfit = estimatedEthOut - totalCost;
   const profitable = netProfit >= minProfitWei;
@@ -108,8 +104,7 @@ export async function quoteProfitability(
     ethPerAztec,
     aztecAmountRaw: aztecAmount,
     estimatedEthOut,
-    gasCostEth,
-    builderTip,
+    builderPayment,
     totalCost,
     netProfit,
     profitable,
@@ -120,14 +115,13 @@ export async function quoteProfitability(
 /// Pretty-print a price quote
 export function formatQuote(q: PriceQuote): string {
   return [
-    `  AZTEC amount:    ${formatEther(q.aztecAmountRaw)} AZTEC`,
-    `  AZTEC/ETH price: ${q.ethPerAztec.toFixed(10)}`,
-    `  Est. ETH out:    ${formatEther(q.estimatedEthOut)} ETH`,
-    `  Gas cost:        ${formatEther(q.gasCostEth)} ETH`,
-    `  Builder tip:     ${formatEther(q.builderTip)} ETH`,
-    `  Total cost:      ${formatEther(q.totalCost)} ETH`,
-    `  Net profit:      ${formatEther(q.netProfit)} ETH`,
-    `  Profitable:      ${q.profitable ? 'YES' : 'NO'}`,
-    `  Min ETH out:     ${formatEther(q.minEthOut)} ETH (slippage-adjusted)`,
+    `  AZTEC amount:       ${formatEther(q.aztecAmountRaw)} AZTEC`,
+    `  AZTEC/ETH price:    ${q.ethPerAztec.toFixed(10)}`,
+    `  Est. ETH out:       ${formatEther(q.estimatedEthOut)} ETH`,
+    `  Builder payment:    ${formatEther(q.builderPayment)} ETH (coinbase.transfer)`,
+    `  Gas cost:           0 ETH (gasPrice=0, paid via builder payment)`,
+    `  Net profit:         ${formatEther(q.netProfit)} ETH`,
+    `  Profitable:         ${q.profitable ? 'YES' : 'NO'}`,
+    `  Min ETH out:        ${formatEther(q.minEthOut)} ETH (slippage-adjusted)`,
   ].join('\n');
 }

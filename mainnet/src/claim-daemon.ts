@@ -12,7 +12,7 @@ export interface ClaimDaemonConfig {
   proverAddress: `0x${string}`;
   batcherAddress: `0x${string}`;
   minProfitEth: number;
-  builderTipEth: number;
+  builderPaymentEth: number;
   slippageBps: number;
   minEpochBatch: number;
   maxEpochBatch: number;
@@ -22,7 +22,7 @@ export interface ClaimDaemonConfig {
 
 const defaultConfig: Omit<ClaimDaemonConfig, 'privateKey' | 'proverAddress' | 'batcherAddress'> = {
   minProfitEth: DEFAULTS.minProfitEth,
-  builderTipEth: DEFAULTS.builderTipEth,
+  builderPaymentEth: DEFAULTS.builderPaymentEth,
   slippageBps: DEFAULTS.slippageBps,
   minEpochBatch: DEFAULTS.minEpochBatch,
   maxEpochBatch: DEFAULTS.maxEpochBatch,
@@ -87,7 +87,7 @@ export async function runClaimDaemon(config: ClaimDaemonConfig): Promise<never> 
       const estimatedAztec = parseEther('4800') * BigInt(batch.length);
       const quote = await quoteProfitability(estimatedAztec, {
         minProfitEth: config.minProfitEth,
-        builderTipEth: config.builderTipEth,
+        builderPaymentEth: config.builderPaymentEth,
         slippageBps: config.slippageBps,
       });
 
@@ -103,7 +103,7 @@ export async function runClaimDaemon(config: ClaimDaemonConfig): Promise<never> 
       console.log(`[${ts()}] Submitting claim for ${batch.length} epochs...`);
       const result = await submitClaimBundle(config.privateKey, config.batcherAddress, batch, {
         minProfitEth: config.minProfitEth,
-        builderTipEth: config.builderTipEth,
+        builderPaymentEth: config.builderPaymentEth,
         slippageBps: config.slippageBps,
         dryRun: config.dryRun,
       });
@@ -111,7 +111,7 @@ export async function runClaimDaemon(config: ClaimDaemonConfig): Promise<never> 
       if (result.success) {
         console.log(`[${ts()}] Claim successful! tx: ${result.txHash ?? 'dry-run'}`);
         console.log(`  Net profit: ${formatEther(result.quote?.netProfit ?? 0n)} ETH`);
-        console.log(`  Via: ${result.submittedVia}`);
+        console.log(`  Bundle: ${result.bundleHash ?? 'n/a'}`);
       } else {
         console.log(`[${ts()}] Claim failed: ${result.error}`);
       }

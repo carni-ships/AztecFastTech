@@ -24,14 +24,14 @@ export const POOL_CONFIG = {
   hooks: ADDRESSES.poolHooks,
 } as const;
 
-// RPC endpoints — Flashbots and MEV Blocker as primaries (private mempool),
-// public endpoints as fallbacks for reads
+// RPC endpoints
 export const RPC_ENDPOINTS = {
-  // Private mempool RPCs (for tx submission only)
-  private: [
-    'https://rpc.flashbots.net',
-    'https://rpc.mevblocker.io',
-  ],
+  // Flashbots relay for bundle submission (eth_sendBundle, eth_callBundle)
+  flashbotsRelay: 'https://relay.flashbots.net',
+  // Flashbots Protect RPC (drop-in, for proof submissions in start-prover-mainnet.sh)
+  flashbotsProtect: 'https://rpc.flashbots.net/fast',
+  // MEV Blocker (fallback private mempool for non-bundle txs)
+  mevBlocker: 'https://rpc.mevblocker.io',
   // Public RPCs (for reads: balance checks, contract queries, price quotes)
   public: [
     'https://eth.llamarpc.com',
@@ -77,9 +77,12 @@ export const DEFAULTS = {
   minEpochBatch: 3,
   // Maximum epochs per claim tx (gas limit consideration)
   maxEpochBatch: 50,
-  // Builder tip in ETH for Flashbots bundle.
-  // At 0.093 gwei base fee, even 0.0005 ETH (~$1) is generous.
-  builderTipEth: 0.0005,
+  // Builder payment in ETH (paid via coinbase.transfer from swap proceeds).
+  // With gasPrice=0, this is the builder's ONLY incentive to include the bundle.
+  // At ~$85/epoch revenue, $1-2 is a reasonable payment.
+  builderPaymentEth: 0.0005,
+  // Target builders for bundle submission (~95% block coverage)
+  builders: ['flashbots', 'beaverbuild.org', 'rsync-builder', 'Titan'] as string[],
   // Slippage tolerance for Uniswap swap (0.5%)
   slippageBps: 50,
   // Gas estimate for claimAndSell tx (claim + swap + transfer, estimated ~4.5M)

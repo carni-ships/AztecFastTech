@@ -1,5 +1,8 @@
-// Flashbots bundle construction and submission
-// Falls back to MEV Blocker if Flashbots fails
+// Flashbots bundle construction and submission via relay API
+//
+// Pattern: gasPrice=0 tx → contract pays builder via coinbase.transfer from swap proceeds
+// On revert: zero cost (bundle not included, no gas paid)
+// Targets all major builders for ~95% block coverage
 
 import {
   createPublicClient,
@@ -8,29 +11,140 @@ import {
   encodeFunctionData,
   formatEther,
   parseEther,
+  serializeTransaction,
+  keccak256,
+  type TransactionSerializable,
+  type Hex,
 } from 'viem';
 import { mainnet } from 'viem/chains';
-import { privateKeyToAccount } from 'viem/accounts';
+import { privateKeyToAccount, signTransaction } from 'viem/accounts';
 import { ADDRESSES, RPC_ENDPOINTS, DEFAULTS } from './config.js';
 import { proverBatcherAbi } from './abis.js';
 import { quoteProfitability, formatQuote, type PriceQuote } from './price.js';
 
 export interface BundleResult {
   success: boolean;
-  txHash?: `0x${string}`;
+  bundleHash?: string;
+  txHash?: Hex;
   quote?: PriceQuote;
   error?: string;
-  submittedVia?: string;
+  targetBlock?: bigint;
 }
 
-/// Build and submit a claim+sell bundle via private mempool
+// Flashbots relay requires a signing key for bundle authentication
+// This can be any key — it's just for identifying the searcher, not for tx signing
+function getFlashbotsAuthKey(): `0x${string}` {
+  // Use the prover key as auth key (Flashbots just uses it for identity/rate limiting)
+  return (process.env.PROVER_PRIVATE_KEY || process.env.FLASHBOTS_AUTH_KEY) as `0x${string}`;
+}
+
+/// Sign a Flashbots bundle payload for relay authentication
+async function flashbotsSign(payload: string, authKey: `0x${string}`): Promise<string> {
+  const account = privateKeyToAccount(authKey);
+  const message = keccak256(`0x${Buffer.from(payload).toString('hex')}`);
+  const signature = await account.signMessage({ message: { raw: message } });
+  return `${account.address}:${signature}`;
+}
+
+/// Send a bundle to the Flashbots relay
+async function sendBundle(
+  signedTxs: Hex[],
+  targetBlock: bigint,
+  authKey: `0x${string}`,
+): Promise<{ bundleHash?: string; error?: string }> {
+  const blockHex = `0x${targetBlock.toString(16)}`;
+
+  const params = {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_sendBundle',
+    params: [{
+      txs: signedTxs,
+      blockNumber: blockHex,
+      // Target all major builders for max inclusion probability
+      // Flashbots builder is included by default
+      builders: DEFAULTS.builders,
+    }],
+  };
+
+  const body = JSON.stringify(params);
+  const signature = await flashbotsSign(body, authKey);
+
+  const response = await fetch(RPC_ENDPOINTS.flashbotsRelay, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Flashbots-Signature': signature,
+    },
+    body,
+  });
+
+  const result = await response.json() as any;
+
+  if (result.error) {
+    return { error: result.error.message || JSON.stringify(result.error) };
+  }
+
+  return { bundleHash: result.result?.bundleHash };
+}
+
+/// Simulate a bundle via Flashbots (free, catches reverts before submission)
+async function simulateBundle(
+  signedTxs: Hex[],
+  targetBlock: bigint,
+  authKey: `0x${string}`,
+): Promise<{ success: boolean; error?: string; gasUsed?: bigint; coinbaseDiff?: bigint }> {
+  const blockHex = `0x${targetBlock.toString(16)}`;
+
+  const params = {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'eth_callBundle',
+    params: [{
+      txs: signedTxs,
+      blockNumber: blockHex,
+      stateBlockNumber: 'latest',
+    }],
+  };
+
+  const body = JSON.stringify(params);
+  const signature = await flashbotsSign(body, authKey);
+
+  const response = await fetch(RPC_ENDPOINTS.flashbotsRelay, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Flashbots-Signature': signature,
+    },
+    body,
+  });
+
+  const result = await response.json() as any;
+
+  if (result.error) {
+    return { success: false, error: result.error.message || JSON.stringify(result.error) };
+  }
+
+  const bundleResult = result.result;
+  if (bundleResult?.results?.[0]?.error) {
+    return { success: false, error: bundleResult.results[0].error };
+  }
+
+  return {
+    success: true,
+    gasUsed: bundleResult?.totalGasUsed ? BigInt(bundleResult.totalGasUsed) : undefined,
+    coinbaseDiff: bundleResult?.coinbaseDiff ? BigInt(bundleResult.coinbaseDiff) : undefined,
+  };
+}
+
+/// Build, simulate, and submit a claim+sell bundle
 export async function submitClaimBundle(
   privateKey: `0x${string}`,
   batcherAddress: `0x${string}`,
   epochs: bigint[],
   overrides?: {
     minProfitEth?: number;
-    builderTipEth?: number;
+    builderPaymentEth?: number;
     slippageBps?: number;
     dryRun?: boolean;
   },
@@ -38,14 +152,16 @@ export async function submitClaimBundle(
   const account = privateKeyToAccount(privateKey);
   const dryRun = overrides?.dryRun ?? false;
 
-  // 1. Estimate total AZTEC rewards for this batch
-  //    32 checkpoints × 500 AZTEC × 30% prover share = 4,800 AZTEC per epoch
-  //    (verified from RollupConfiguration.sol:73-74)
-  //    Actual share depends on activity score and number of competing provers
+  const publicClient = createPublicClient({
+    chain: mainnet,
+    transport: http(RPC_ENDPOINTS.public[0]),
+  });
+
+  // 1. Estimate rewards and check profitability
+  //    32 checkpoints × 500 AZTEC × 30% prover = 4,800 AZTEC per epoch
   const estimatedAztecPerEpoch = parseEther('4800');
   const totalAztecEstimate = estimatedAztecPerEpoch * BigInt(epochs.length);
 
-  // 2. Get profitability quote
   const quote = await quoteProfitability(totalAztecEstimate, overrides);
 
   console.log(`\nProfitability check for ${epochs.length} epochs:`);
@@ -55,89 +171,112 @@ export async function submitClaimBundle(
     return {
       success: false,
       quote,
-      error: `Not profitable: net ${formatEther(quote.netProfit)} ETH (need ${formatEther(parseEther(String(overrides?.minProfitEth ?? DEFAULTS.minProfitEth)))})`,
+      error: `Not profitable: net ${formatEther(quote.netProfit)} ETH`,
     };
   }
 
-  if (dryRun) {
-    console.log('\n[DRY RUN] Would submit bundle — skipping.');
-    return { success: true, quote, submittedVia: 'dry-run' };
-  }
+  // 2. Build the claimAndSell calldata
+  const builderPayment = parseEther(String(overrides?.builderPaymentEth ?? DEFAULTS.builderPaymentEth));
+  const minOperatorProfit = parseEther(String(overrides?.minProfitEth ?? DEFAULTS.minProfitEth));
 
-  // 3. Build the claimAndSell transaction
   const calldata = encodeFunctionData({
     abi: proverBatcherAbi,
     functionName: 'claimAndSell',
-    args: [epochs, quote.minEthOut, parseEther(String(overrides?.minProfitEth ?? DEFAULTS.minProfitEth)), quote.builderTip],
+    args: [epochs, quote.minEthOut, builderPayment, minOperatorProfit],
   });
 
-  // 4. Try each private RPC endpoint
-  for (const rpcUrl of RPC_ENDPOINTS.private) {
-    try {
-      console.log(`\nSubmitting via ${new URL(rpcUrl).hostname}...`);
+  // 3. Build the transaction with gasPrice=0
+  //    Builder is paid via coinbase.transfer from swap proceeds, not via gas fee
+  const nonce = await publicClient.getTransactionCount({ address: account.address });
+  const currentBlock = await publicClient.getBlockNumber();
 
-      const walletClient = createWalletClient({
-        account,
-        chain: mainnet,
-        transport: http(rpcUrl),
-      });
+  const tx: TransactionSerializable = {
+    to: batcherAddress,
+    data: calldata,
+    gas: DEFAULTS.gasEstimate,
+    maxFeePerGas: 0n,          // Zero gas price — builder paid via coinbase.transfer
+    maxPriorityFeePerGas: 0n,  // Zero priority — all payment via coinbase
+    nonce,
+    chainId: 1,
+    type: 'eip1559',
+  };
 
-      const publicClient = createPublicClient({
-        chain: mainnet,
-        transport: http(RPC_ENDPOINTS.public[0]),
-      });
+  // 4. Sign the transaction
+  const walletClient = createWalletClient({
+    account,
+    chain: mainnet,
+    transport: http(RPC_ENDPOINTS.public[0]),
+  });
 
-      // Get nonce and gas estimate from public RPC
-      const [nonce, gasPrice] = await Promise.all([
-        publicClient.getTransactionCount({ address: account.address }),
-        publicClient.getGasPrice(),
-      ]);
+  const serialized = await walletClient.signTransaction(tx);
 
-      const txHash = await walletClient.sendTransaction({
-        to: batcherAddress,
-        data: calldata,
-        gas: DEFAULTS.gasEstimate,
-        maxFeePerGas: gasPrice * 2n, // 2x buffer for inclusion
-        maxPriorityFeePerGas: gasPrice / 10n, // low priority — builder tip is the real payment
-        nonce,
-      });
+  if (dryRun) {
+    console.log('\n[DRY RUN] Would submit bundle — skipping.');
+    console.log(`  Target blocks: ${currentBlock + 1n}, ${currentBlock + 2n}`);
+    console.log(`  Builder payment: ${formatEther(builderPayment)} ETH`);
+    console.log(`  Min operator profit: ${formatEther(minOperatorProfit)} ETH`);
+    return { success: true, quote, targetBlock: currentBlock + 1n };
+  }
 
-      console.log(`  Submitted: ${txHash}`);
+  // 5. Simulate the bundle first (free, catches reverts)
+  const authKey = getFlashbotsAuthKey();
+  console.log('\nSimulating bundle...');
+  const sim = await simulateBundle([serialized], currentBlock + 1n, authKey);
 
-      // Wait for confirmation
-      const receipt = await publicClient.waitForTransactionReceipt({
-        hash: txHash,
-        timeout: 120_000, // 2 minutes
-      });
+  if (!sim.success) {
+    console.log(`  Simulation failed: ${sim.error}`);
+    return { success: false, quote, error: `Simulation failed: ${sim.error}` };
+  }
 
-      if (receipt.status === 'success') {
-        console.log(`  Confirmed in block ${receipt.blockNumber}`);
-        return {
-          success: true,
-          txHash,
-          quote,
-          submittedVia: new URL(rpcUrl).hostname,
-        };
-      } else {
-        console.log(`  Reverted in block ${receipt.blockNumber}`);
-        return {
-          success: false,
-          txHash,
-          quote,
-          error: 'Transaction reverted on-chain',
-          submittedVia: new URL(rpcUrl).hostname,
-        };
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.log(`  Failed: ${msg.slice(0, 120)}`);
-      continue; // Try next RPC
+  console.log(`  Simulation OK — gas: ${sim.gasUsed}, coinbaseDiff: ${sim.coinbaseDiff}`);
+
+  // 6. Submit to block+1 AND block+2 for higher inclusion probability
+  console.log('\nSubmitting bundle to all builders...');
+  const targets = [currentBlock + 1n, currentBlock + 2n];
+  const results = await Promise.all(
+    targets.map(block => sendBundle([serialized], block, authKey)),
+  );
+
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    if (r.error) {
+      console.log(`  Block ${targets[i]}: ERROR — ${r.error}`);
+    } else {
+      console.log(`  Block ${targets[i]}: submitted (hash: ${r.bundleHash})`);
     }
   }
 
-  return {
-    success: false,
-    quote,
-    error: 'All private RPC endpoints failed',
-  };
+  // 7. Wait for inclusion
+  const successResult = results.find(r => r.bundleHash);
+  if (!successResult) {
+    return { success: false, quote, error: 'All bundle submissions failed' };
+  }
+
+  console.log('\nWaiting for inclusion (up to 2 blocks)...');
+  try {
+    // Poll for the tx to appear on-chain
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await new Promise(r => setTimeout(r, 15_000)); // ~1 block
+      const block = await publicClient.getBlockNumber();
+      if (block > currentBlock + 2n) {
+        // Check if our tx landed
+        const receipt = await publicClient.getTransactionReceipt({ hash: keccak256(serialized) }).catch(() => null);
+        if (receipt) {
+          console.log(`  Included in block ${receipt.blockNumber}!`);
+          return {
+            success: receipt.status === 'success',
+            bundleHash: successResult.bundleHash,
+            txHash: receipt.transactionHash,
+            quote,
+            targetBlock: receipt.blockNumber,
+          };
+        }
+      }
+    }
+    console.log('  Bundle not included in target blocks (may retry next cycle).');
+    return { success: false, quote, bundleHash: successResult.bundleHash, error: 'Not included in target blocks' };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, quote, error: msg };
+  }
 }
