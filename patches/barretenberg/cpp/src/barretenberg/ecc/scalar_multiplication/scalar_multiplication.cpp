@@ -460,7 +460,8 @@ template <typename Curve>
 std::vector<typename Curve::AffineElement> MSM<Curve>::batch_multi_scalar_mul(
     std::span<std::span<const typename Curve::AffineElement>> points,
     std::span<std::span<ScalarField>> scalars,
-    bool handle_edge_cases) noexcept
+    bool handle_edge_cases,
+    bool restore_scalars) noexcept
 {
     BB_ASSERT_EQ(points.size(), scalars.size());
     const size_t num_msms = points.size();
@@ -510,12 +511,14 @@ std::vector<typename Curve::AffineElement> MSM<Curve>::batch_multi_scalar_mul(
     Element::batch_normalize(results.data(), num_msms);
 
     // Convert scalars back TO Montgomery form so they remain unchanged from caller's perspective
-    for (auto& scalar_span : scalars) {
-        parallel_for_range(scalar_span.size(), [&](size_t start, size_t end) {
-            for (size_t i = start; i < end; ++i) {
-                scalar_span[i].self_to_montgomery_form();
-            }
-        });
+    if (restore_scalars) {
+        for (auto& scalar_span : scalars) {
+            parallel_for_range(scalar_span.size(), [&](size_t start, size_t end) {
+                for (size_t i = start; i < end; ++i) {
+                    scalar_span[i].self_to_montgomery_form();
+                }
+            });
+        }
     }
 
     return std::vector<AffineElement>(results.begin(), results.end());

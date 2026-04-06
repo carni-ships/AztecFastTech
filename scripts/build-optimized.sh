@@ -4,9 +4,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BB_SRC="$SCRIPT_DIR/barretenberg/cpp/src/barretenberg"
-BB_BUILD="$SCRIPT_DIR/barretenberg/cpp/build"
-BIN_DIR="$SCRIPT_DIR/bin"
+AZTEC_ROOT="${AZTEC_ROOT:-$SCRIPT_DIR/../../aztec-packages-v4.1.2}"
+BB_SRC="$AZTEC_ROOT/barretenberg/cpp/src/barretenberg"
+BB_BUILD="$AZTEC_ROOT/barretenberg/cpp/build"
+BIN_DIR="$SCRIPT_DIR/../bin"
 BACKUP_DIR=$(mktemp -d)
 
 echo "=== Building optimized barretenberg ==="
@@ -18,7 +19,6 @@ echo ""
 PATCH_FILES=(
     "flavor/partially_evaluated_multivariates.hpp"
     "commitment_schemes/commitment_key.hpp"
-    "bbapi/bbapi_ultra_honk.cpp"
     "polynomials/backing_memory.hpp"
     "ecc/scalar_multiplication/scalar_multiplication.cpp"
 )
@@ -64,16 +64,15 @@ echo "  [3] Per-window bucket bailout (permanent in source)"
 
 # 4. CommitmentKey cache: avoid SRS re-fetch + Metal prewarm across same-size proofs
 PATCH_SRC="$SCRIPT_DIR/../patches/barretenberg/cpp/src/barretenberg"
+BASE_DIR="$SCRIPT_DIR/.."
 if [ -f "$PATCH_SRC/commitment_schemes/commitment_key.hpp" ]; then
     cp "$PATCH_SRC/commitment_schemes/commitment_key.hpp" "$BB_SRC/commitment_schemes/commitment_key.hpp"
     echo "  [4] CommitmentKey::get_or_create() cache"
 fi
 
-# 5. bbapi CK cache integration: use cached CK in prove path
-if [ -f "$PATCH_SRC/bbapi/bbapi_ultra_honk.cpp" ]; then
-    cp "$PATCH_SRC/bbapi/bbapi_ultra_honk.cpp" "$BB_SRC/bbapi/bbapi_ultra_honk.cpp"
-    echo "  [5] bbapi: cached CommitmentKey in prove path"
-fi
+# 5. bbapi CK cache integration: skipped — upstream now has its own precomputed
+#    polynomial cache and ACIR format cache; patch is outdated (273 vs 734 lines)
+echo "  [5] bbapi CK cache: SKIPPED (upstream has precomputed poly cache)"
 
 # 6. Huge page support for large polynomial allocations (reduces TLB misses)
 if [ -f "$PATCH_SRC/polynomials/backing_memory.hpp" ]; then
@@ -92,16 +91,16 @@ echo ""
 # === Build ===
 echo "--- Building (ninja) ---"
 cd "$BB_BUILD"
-ninja -j$(sysctl -n hw.logicalcpu) bb ultra_honk_bench chonk_bench pippenger_bench 2>&1 | tail -30
+ninja -j$(sysctl -n hw.logicalcpu) bb bb-avm 2>&1 | tail -30
 echo ""
 
 # === Copy binaries ===
 echo "--- Copying binaries to $BIN_DIR ---"
 mkdir -p "$BIN_DIR"
-for bin in bb ultra_honk_bench chonk_bench pippenger_bench; do
+for bin in bb bb-avm; do
     if [ -f "$BB_BUILD/bin/$bin" ]; then
-        cp "$BB_BUILD/bin/$bin" "$BIN_DIR/${bin}-opt"
-        echo "  Copied: ${bin}-opt"
+        cp "$BB_BUILD/bin/$bin" "$BIN_DIR/$bin"
+        echo "  Copied: $bin"
     fi
 done
 
