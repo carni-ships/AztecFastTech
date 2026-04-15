@@ -129,3 +129,4 @@ The generic Noir prover SDK (circuit-agnostic proving, adapter pattern, Persisti
 ## License
 
 MIT
+\n<!-- PR pipeline test: $(date -u +%Y-%m-%dT%H:%M:%SZ) -->
