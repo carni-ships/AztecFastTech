@@ -18,7 +18,6 @@
 # Compiled circuits and witnesses (regenerable)
 # IDE / editor
 # Intermediate report formats
-# Internal dev notes
 # Metal compiled shaders
 # Node
 # OS
@@ -33,4 +32,13 @@ profile_*.txt
 proof_*/
 reports/*.html
 target/
+Thumbs.db
+# Aztec prover runtime data (LMDB databases, logs)
+.prover-data/
+# Foundry contract build outputs
+mainnet/contracts/out/
+mainnet/contracts/cache/
+# Git submodules (not code)
+lib/forge-std/
+lib/openzeppelin-contracts/
 Thumbs.db
