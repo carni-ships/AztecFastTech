@@ -23,6 +23,22 @@
 #   PROVER_AGENTS           - Number of proving agents (default: auto-detect)
 #   PROVER_THREADS          - Threads per agent (default: auto-detect)
 #   DISABLE_FLASHBOTS       - Set to 1 to skip Flashbots Protect (not recommended)
+#   BB_PK_CACHE_MAX         - Proving key cache size (default: 3, each ~900 MiB at 2^20)
+#
+# ADVANCED: Node/Prover Process Split (saves ~200-300 MiB RAM):
+#   The prover node and agent(s) can run as separate processes, keeping the node's
+#   archiver/world-state DB out of the agent's RSS. Requires shared filesystem for
+#   DATA_DIRECTORY and PROOF_STORE.
+#   1. Terminal 1 — Node + broker only (no agent):
+#      aztec start --prover-node --network mainnet --prover-broker \
+#        --rpc-url $ETHEREUM_MAINNET_RPC --port 8180 \
+#        --proverNode.nodeUrl $AZTEC_MAINNET_NODE_URL \
+#        --data-directory $DATA_DIR
+#   2. Terminal 2 — Agent(s) connecting to broker:
+#      PROVER_BROKER_HOST=http://localhost:8180 \
+#      PROVER_AGENT_COUNT=3 PROVER_THREADS=4 \
+#      BB_SLOW_LOW_MEMORY=1 BB_PK_CACHE_MAX=3 \
+#      aztec start --prover-agent
 
 set -e
 
@@ -81,6 +97,11 @@ PROVER_AGENTS="${PROVER_AGENTS:-3}"
 PROVER_THREADS="${PROVER_THREADS:-4}"
 
 export BB_SLOW_LOW_MEMORY=1
+# Cache up to 3 proving key types (reduced from 5 to save ~1.8 GiB).
+# Each entry ~900 MiB at 2^20. With 1 agent ~5 GiB + 1.5 GiB SRS = ~8 GiB total.
+# Tradeoff: may recompute VKs more often, adding ~1-3s per proof for uncached types.
+# Set BB_PK_CACHE_MAX=5 if memory is ample.
+export BB_PK_CACHE_MAX="${BB_PK_CACHE_MAX:-3}"
 
 # --- Scratch directory for file-backed polynomials ---
 BB_RAMDISK_SIZE_MB="${BB_RAMDISK_SIZE_MB:-0}"
@@ -125,7 +146,23 @@ export PROVER_BROKER_PREEMPTION_THRESHOLD_MS=2000
 export PROVER_BROKER_BATCH_INTERVAL_MS=500
 export PROVER_BROKER_BATCH_SIZE=1000
 export PROVER_MAX_CONCURRENT_HEAVY="${PROVER_MAX_CONCURRENT_HEAVY:-1}"
-export PROVER_MAX_CONCURRENT_LARGE="${PROVER_MAX_CONCURRENT_LARGE:-2}"
+export PROVER_MAX_CONCURRENT_LARGE="${PROVER_MAX_CONCURRENT_LARGE:-1}"
+
+# =============================================================================
+# OOM MITIGATION — V8 heap limits to prevent JavaScript heap exhaustion
+# =============================================================================
+# PUBLIC_CHONK_VERIFIER circuits cause V8 heap OOM at ~4GB+ in witness generation.
+# Capping the heap forces more frequent GC before hitting the ceiling, preventing
+# the "Ineffective mark-compacts near heap limit" crash pattern observed on Apr 12.
+#
+# --max-old-space-size: cap old-generation heap at 3GB (default grows to ~4GB+).
+#   Tradeoff: slightly higher CPU from more frequent GC, but avoids OOM crashes.
+#   The agent restarts more cleanly after each epoch with a bounded heap.
+export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=3072}"
+
+# Additional mitigations if OOM persists:
+#   NODE_OPTIONS="--max-old-space-size=2560"  # 2.5GB cap (more aggressive GC)
+#   NODE_OPTIONS="--max-old-space-size=2048"  # 2GB cap (use if 3GB still OOMs)
 
 # =============================================================================
 # MAINNET CONFIG

@@ -31,6 +31,11 @@ PROVER_THREADS="${PROVER_THREADS:-4}"
 # with file-backed mmap the OS keeps only the working set in RAM.
 export BB_SLOW_LOW_MEMORY=1
 
+# Cache up to 3 proving key types (reduced from default 3, saves ~1.8 GiB at 2^20).
+# Each entry ~900 MiB. With 1 agent ~5 GiB + 1.5 GiB SRS = ~8 GiB total.
+# Lower to 2 if OOM persists.
+export BB_PK_CACHE_MAX="${BB_PK_CACHE_MAX:-3}"
+
 # --- Scratch directory for file-backed polynomials ---
 # By default, BB writes mmap'd temp files to $TMPDIR (macOS per-user /var/folders).
 # BB_SCRATCH_DIR lets us redirect to a faster location:
@@ -109,7 +114,26 @@ export PROVER_BROKER_BATCH_SIZE=1000
 # Third agent handles light proofs (2^21 and below) or waits.
 # This prevents 3 concurrent 5+ GiB proofs from causing 6+ GB swap on 18 GiB.
 export PROVER_MAX_CONCURRENT_HEAVY="${PROVER_MAX_CONCURRENT_HEAVY:-1}"
-export PROVER_MAX_CONCURRENT_LARGE="${PROVER_MAX_CONCURRENT_LARGE:-2}"
+export PROVER_MAX_CONCURRENT_LARGE="${PROVER_MAX_CONCURRENT_LARGE:-1}"
+
+# =============================================================================
+# OOM MITIGATION — V8 heap limits to prevent JavaScript heap exhaustion
+# =============================================================================
+# PUBLIC_CHONK_VERIFIER circuits cause V8 heap OOM at ~4GB+ in witness generation.
+# Capping the heap forces more frequent GC before hitting the ceiling, preventing
+# the "Ineffective mark-compacts near heap limit" crash pattern observed on Apr 12.
+#
+# --max-old-space-size: cap old-generation heap at 3GB (default grows to ~4GB+).
+#   Tradeoff: slightly higher CPU from more frequent GC, but avoids OOM crashes.
+#   The agent restarts more cleanly after each epoch with a bounded heap.
+#
+# --expose-gc: allows process.gc() calls if the JS code uses them.
+#   (Note: not all Aztec JS uses explicit gc(), but V8 flags help regardless.)
+export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=3072}"
+
+# Additional mitigations if OOM persists:
+#   NODE_OPTIONS="--max-old-space-size=2560"  # 2.5GB cap (more aggressive GC)
+#   NODE_OPTIONS="--max-old-space-size=2048"  # 2GB cap (use if 3GB still OOMs)
 
 # Adaptive per-proof thread count: override bb HARDWARE_CONCURRENCY per circuit size.
 # Format: "dyadicSize:threads,..." (log2 gate count : thread count).
@@ -303,6 +327,7 @@ echo "  L1 RPC:     $L1_RPC"
 echo "  Aztec node: $AZTEC_NODE_URL"
 echo "  Prover:     $PROVER_ADDRESS"
 echo "  Agents:     $PROVER_AGENTS × $PROVER_THREADS threads"
+echo "  Memory:     BB_PK_CACHE_MAX=$BB_PK_CACHE_MAX, NODE_MAX_HEAP=${NODE_OPTIONS:-3GB}"
 echo "  bb binary:  $BB_BINARY"
 echo "  acvm binary: $ACVM_BINARY"
 echo "  bb workdir: $BB_WORK_DIR"
@@ -447,6 +472,7 @@ if [ "$SPLIT_BROKER" = "1" ]; then
     --rpcMaxBodySize 50mb \
     --proverNode.nodeUrl "$AZTEC_NODE_URL" \
     --proverNode.proverId "$PROVER_ADDRESS" \
+    --proverAgent.proverBrokerUrl "$BROKER_URL" \
     --proverAgent.proverAgentCount "$PROVER_AGENTS"
 else
   # Single-process mode: all components in one process (saves ~200MB RAM)
